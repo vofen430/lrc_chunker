@@ -1,0 +1,22 @@
+﻿name: lrc-chunker-py38
+channels:
+  - pytorch
+  - conda-forge
+dependencies:
+  - python=3.8
+  - pip
+  - ffmpeg
+  - numpy=1.24.4
+  - scipy=1.10.1
+  - librosa=0.10.2.post1
+  - matplotlib=3.7.5
+  - pillow=10.4.0
+  - pytorch=2.3.1
+  - torchaudio=2.3.1
+  - cpuonly
+  - pip:
+      - stable-ts==2.19.1
+      - openai-whisper==20250625
+      - imageio==2.31.5
+      - tqdm>=4.66,<5
+      - demucs==4.0.1

@@ -1,0 +1,9 @@
+﻿__pycache__/
+*.py[cod]
+.pytest_cache/
+.pytest_tmp/
+.tmp/
+.tmp_manual_tests/
+.tmp_manual_tests_final/
+artifacts/
+pytest-cache-files-*/

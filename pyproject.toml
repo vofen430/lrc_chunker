@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lrc-chunker"
+version = "0.1.0"
+description = "Song + LRC pipeline for word timestamps, lyric chunking, M0/M1 features, and preview videos."
+readme = "README.md"
+requires-python = ">=3.8,<3.9"
+license = { text = "MIT" }
+authors = [
+  { name = "Codex" }
+]
+dependencies = [
+  "numpy==1.24.4",
+  "stable-ts==2.19.1",
+  "openai-whisper==20250625",
+  "torch==2.3.1",
+  "torchaudio==2.3.1",
+  "tqdm>=4.66,<5",
+  "librosa==0.10.2.post1",
+  "scipy==1.10.1",
+  "matplotlib==3.7.5",
+  "imageio==2.31.5",
+  "Pillow==10.4.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.4.1",
+]
+separation = [
+  "demucs==4.0.1",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
