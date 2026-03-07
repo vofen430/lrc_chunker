@@ -89,6 +89,28 @@ def safe_stem(path: str) -> str:
     return stem or "artifact"
 
 
+def first_existing_path(candidates: Iterable[object]) -> str:
+    for candidate in candidates:
+        if not candidate:
+            continue
+        path = Path(str(candidate)).expanduser()
+        if path.is_file():
+            return str(path.resolve())
+    return ""
+
+
+def find_payload_vocals_path(payload: dict) -> str:
+    meta = payload.get("meta", {}) if isinstance(payload, dict) else {}
+    word_refine = meta.get("word_refine", {}) if isinstance(meta, dict) else {}
+    return first_existing_path(
+        [
+            meta.get("denoiser_output_path"),
+            meta.get("vocals_path"),
+            word_refine.get("audio_vocals") if isinstance(word_refine, dict) else "",
+        ]
+    )
+
+
 def clamp(value: float, lo: float, hi: float) -> float:
     return max(lo, min(hi, value))
 

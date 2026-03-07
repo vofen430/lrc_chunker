@@ -16,9 +16,11 @@ class AlignmentConfig:
     vad_threshold: float = 0.35
     denoiser: str = "auto"
     denoiser_effective: str = "none"
+    denoiser_output_path: str = ""
     max_word_dur: float = 3.0
     alignment_backend: str = "stable_ts"
     allow_lrc_fallback: bool = False
+    only_voice_freq: bool = False
 
 
 def _is_word_token(token: str) -> bool:
@@ -51,25 +53,25 @@ def _flatten_stable_result(result_obj: object) -> List[Dict[str, float]]:
 def _assign_aligned_words_to_lines(lines: Sequence[LyricLine], aligned_words: Sequence[Dict[str, float]]) -> Tuple[List[WordTiming], List[Dict[str, object]]]:
     from .utils import tokenize
 
-    ref_counts = []
+    line_word_tokens: List[List[str]] = []
     for line in lines:
-        count = sum(1 for tok in tokenize(line.text) if _is_word_token(tok))
-        ref_counts.append(count)
+        toks = [tok for tok in tokenize(line.text) if _is_word_token(tok)]
+        line_word_tokens.append(toks)
 
     word_items = [w for w in aligned_words if _is_word_token(str(w["text"]))]
     word_cursor = 0
     out_words: List[WordTiming] = []
     line_records: List[Dict[str, object]] = []
 
-    for line, wanted_count in zip(lines, ref_counts):
+    for line, line_tokens in zip(lines, line_word_tokens):
         current: List[WordTiming] = []
-        for _ in range(wanted_count):
+        for token in line_tokens:
             if word_cursor >= len(word_items):
                 break
             item = word_items[word_cursor]
             current.append(
                 WordTiming(
-                    text=str(item["text"]).strip(),
+                    text=token,
                     start=float(item["start"]),
                     end=float(item["end"]),
                     line_id=line.line_id,
@@ -139,6 +141,21 @@ def fallback_align_from_lrc(lines: Sequence[LyricLine], audio_path: Optional[str
     return words, records, "lrc_fallback"
 
 
+def _normalize_denoiser_name(config: AlignmentConfig) -> Optional[str]:
+    requested = str(config.denoiser or "").strip().lower()
+    if requested in {"", "none", "off", "false", "0"}:
+        return None
+    if requested != "auto":
+        return requested
+    try:
+        from stable_whisper.audio import get_denoiser_func  # type: ignore
+
+        get_denoiser_func("demucs", "access")()
+    except Exception:
+        return None
+    return "demucs"
+
+
 def align_lyrics(audio_path: str, lines: Sequence[LyricLine], config: AlignmentConfig) -> Tuple[List[WordTiming], List[Dict[str, object]], str]:
     if config.alignment_backend == "lrc":
         return fallback_align_from_lrc(lines, audio_path)
@@ -146,21 +163,35 @@ def align_lyrics(audio_path: str, lines: Sequence[LyricLine], config: AlignmentC
     try:
         import stable_whisper  # type: ignore
         from stable_whisper.alignment import align as stable_align  # type: ignore
+        from stable_whisper.default import set_global_overwrite_permission  # type: ignore
     except Exception:
         if config.allow_lrc_fallback:
             return fallback_align_from_lrc(lines, audio_path)
         raise
 
     try:
+        set_global_overwrite_permission(True)
         model = stable_whisper.load_model(config.model)
+        denoiser_name = _normalize_denoiser_name(config)
+        denoiser_options: Optional[Dict[str, object]] = None
+        if denoiser_name:
+            denoiser_options = {}
+            if config.denoiser_output_path:
+                save_path = Path(config.denoiser_output_path).expanduser().resolve()
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                denoiser_options["save_path"] = str(save_path)
+        config.denoiser_effective = denoiser_name or "none"
         result = stable_align(
             model,
             audio_path,
             reference_text(list(lines)),
             language=config.language,
             max_word_dur=config.max_word_dur,
+            denoiser=denoiser_name,
+            denoiser_options=denoiser_options,
             vad=True,
             vad_threshold=config.vad_threshold,
+            only_voice_freq=config.only_voice_freq,
             original_split=False,
         )
         flat = _flatten_stable_result(result)
@@ -169,6 +200,7 @@ def align_lyrics(audio_path: str, lines: Sequence[LyricLine], config: AlignmentC
         words, line_records = _assign_aligned_words_to_lines(lines, flat)
         return words, line_records, "stable_ts"
     except Exception:
+        config.denoiser_effective = "none"
         if config.allow_lrc_fallback:
             return fallback_align_from_lrc(lines, audio_path)
         raise
@@ -195,6 +227,7 @@ def build_alignment_payload(
             "vad_threshold": config.vad_threshold,
             "denoiser_requested": config.denoiser,
             "denoiser_effective": config.denoiser_effective,
+            "denoiser_output_path": config.denoiser_output_path,
             "max_word_dur": config.max_word_dur,
         },
         "lines": [line.to_dict() for line in lines],

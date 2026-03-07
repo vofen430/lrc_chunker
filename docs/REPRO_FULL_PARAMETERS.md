@@ -216,21 +216,25 @@ Built-in profiles:
 
 - `mild`
 - `balanced`
+- `slow_attack`
 - `aggressive`
 - `rap_snap`
 
-### Default `balanced` profile
+### Default `slow_attack` profile
 
-- `start_shift_max`: `0.14`
+- `start_shift_max`: `0.40`
 - `start_back_max`: `0.03`
 - `boundary_shift_max`: `0.12`
 - `min_word_dur`: `0.10`
 - `func_max_dur`: `0.52`
 - `func_ratio_max`: `2.1`
-- `keep_weight`: `0.70`
+- `keep_weight`: `0.35`
 - `onset_weight`: `1.00`
-- `prefer_future_penalty`: `0.45`
+- `prefer_future_penalty`: `1.55`
 - `force_forward_min_gap`: `0.05`
+- `use_lrc_anchors`: `true`
+- `lrc_anchor_span_words`: `1`
+- `lrc_anchor_max_ratio`: `0.15`
 
 ### `rap_snap` profile added in this project
 
@@ -271,8 +275,6 @@ Typical command form:
 ```powershell
 python word_timing_refine.py "chunking.json" `
   --audio-mix "Memories - Conan Gray.wav" `
-  --audio-vocals "vocals.wav" `
-  --profile balanced `
   --sr 22050 `
   --hop-length 256
 ```
@@ -460,7 +462,7 @@ Audio used in this project session:
 
 Lyrics used in this project session:
 
-- `Memories - Conan Gray.lrc`
+- `examples/Memories - Conan Gray.lrc`
 
 Optional vocal stem used in comparison/refinement:
 
@@ -511,4 +513,3 @@ Current project focus areas identified during the session:
 If manual anchors are used, they should be interpreted as:
 
 - human-annotated word start times
-

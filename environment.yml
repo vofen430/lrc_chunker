@@ -5,18 +5,20 @@ channels:
 dependencies:
   - python=3.8
   - pip
-  - ffmpeg
+  - conda-forge::ffmpeg
   - numpy=1.24.4
   - scipy=1.10.1
-  - librosa=0.10.2.post1
-  - matplotlib=3.7.5
-  - pillow=10.4.0
   - pytorch=2.3.1
   - torchaudio=2.3.1
   - cpuonly
   - pip:
+      - librosa==0.10.2.post1
+      - matplotlib==3.7.5
+      - pillow==10.4.0
       - stable-ts==2.19.1
       - openai-whisper==20250625
       - imageio==2.31.5
+      - imageio-ffmpeg==0.5.1
       - tqdm>=4.66,<5
       - demucs==4.0.1
+      - pytest==8.3.5

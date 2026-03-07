@@ -7,8 +7,8 @@ from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 
-from .motion_m1_demucs_benchmark import compose_quad_video, mux_audio_with_ffmpeg, render_single_preview
-from .utils import clamp, mean, percentile, read_json, safe_stem, write_json
+from .motion_m1_demucs_benchmark import compose_quad_video_with_audio, render_single_preview_with_audio
+from .utils import clamp, find_payload_vocals_path, mean, percentile, read_json, safe_stem, write_json
 
 
 DEFAULTS = {
@@ -21,7 +21,7 @@ DEFAULTS = {
     "word_onset_window": 0.12,
     "word_beat_window": 0.10,
     "video_fps": 8,
-    "video_max_seconds": 90.0,
+    "video_max_seconds": 60.0,
 }
 
 
@@ -193,6 +193,7 @@ def _extract_rows(m0_payload: dict, audio_path: str, source_name: str, cfg: Dict
 def run_benchmark(args) -> int:
     m0_path = Path(args.m0).expanduser().resolve()
     m0_payload = read_json(m0_path)
+    vocals_path = args.vocals_path or find_payload_vocals_path(m0_payload)
     run_dir = Path(args.run_dir).expanduser().resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -220,10 +221,9 @@ def run_benchmark(args) -> int:
     vocals_json = None
     vocals_report_json = None
     comparison_json = None
-    raw_video = None
     mux_video = None
-    if args.vocals_path:
-        vocals_payload, vocals_report = _extract_rows(m0_payload, args.vocals_path, "demucs_vocals", cfg)
+    if vocals_path:
+        vocals_payload, vocals_report = _extract_rows(m0_payload, vocals_path, "demucs_vocals", cfg)
         vocals_json = run_dir / "features_audio_fast_demucs_vocals.json"
         vocals_report_json = run_dir / "validation_report_m1_demucs_vocals.json"
         comparison_json = run_dir / "comparison_report_m1_demucs.json"
@@ -242,23 +242,19 @@ def run_benchmark(args) -> int:
         print(f"[m1] wrote {vocals_report_json}")
         print(f"[m1] wrote {comparison_json}")
 
-        raw_video = run_dir / "m1_demucs_parameter_preview_raw.mp4"
-        render_single_preview(
+        mux_video = run_dir / "m1_demucs_parameter_preview.mp4"
+        render_single_preview_with_audio(
             m0_path=m0_path,
             m1_mix_path=mix_json,
             m1_demucs_path=vocals_json,
             audio_mix_path=Path(args.audio).expanduser().resolve(),
-            audio_vocals_path=Path(args.vocals_path).expanduser().resolve(),
-            out_video_path=raw_video,
+            audio_vocals_path=Path(vocals_path).expanduser().resolve(),
+            out_video_path=mux_video,
             fps=int(args.video_fps),
             max_seconds=float(args.video_max_seconds),
             comparison_note=args.comparison_note,
         )
-        print(f"[m1] wrote {raw_video}")
-        if args.mux_original_audio:
-            mux_video = run_dir / "m1_demucs_parameter_preview.mp4"
-            mux_audio_with_ffmpeg(raw_video, Path(args.audio).expanduser().resolve(), mux_video, duration_sec=float(args.video_max_seconds))
-            print(f"[m1] wrote {mux_video}")
+        print(f"[m1] wrote {mux_video}")
 
     return 0
 
@@ -311,7 +307,6 @@ def _benchmark_parser(subparsers) -> None:
     p.add_argument("--word-beat-window", type=float, default=float(DEFAULTS["word_beat_window"]))
     p.add_argument("--video-fps", type=int, default=int(DEFAULTS["video_fps"]))
     p.add_argument("--video-max-seconds", type=float, default=float(DEFAULTS["video_max_seconds"]))
-    p.add_argument("--mux-original-audio", action="store_true")
     p.add_argument("--comparison-note", type=str, default="")
 
 
@@ -343,28 +338,25 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.cmd == "single":
         out_path = Path(args.output).expanduser().resolve()
-        render_single_preview(
+        final_path = Path(args.mux_output).expanduser().resolve() if args.mux_output else out_path
+        render_single_preview_with_audio(
             m0_path=Path(args.m0).expanduser().resolve(),
             m1_mix_path=Path(args.m1_mix).expanduser().resolve(),
             m1_demucs_path=Path(args.m1_demucs).expanduser().resolve(),
             audio_mix_path=Path(args.audio_mix).expanduser().resolve(),
             audio_vocals_path=Path(args.audio_vocals).expanduser().resolve(),
-            out_video_path=out_path,
+            out_video_path=final_path,
             fps=int(args.fps),
             max_seconds=float(args.max_seconds),
             comparison_note=args.comparison_note,
         )
-        if args.mux_output:
-            mux_audio_with_ffmpeg(
-                out_path,
-                Path(args.audio_mix).expanduser().resolve(),
-                Path(args.mux_output).expanduser().resolve(),
-                duration_sec=float(args.max_seconds),
-            )
         return 0
 
     if args.cmd == "quad":
-        compose_quad_video(
+        if not args.audio_source:
+            raise ValueError("quad requires --audio-source so only muxed output is generated.")
+        final_path = Path(args.mux_output).expanduser().resolve() if args.mux_output else Path(args.output).expanduser().resolve()
+        compose_quad_video_with_audio(
             inputs=[
                 Path(args.in1).expanduser().resolve(),
                 Path(args.in2).expanduser().resolve(),
@@ -372,9 +364,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 Path(args.in4).expanduser().resolve(),
             ],
             labels=[args.label1, args.label2, args.label3, args.label4],
-            out_raw_path=Path(args.output).expanduser().resolve(),
-            out_mux_path=Path(args.mux_output).expanduser().resolve() if args.mux_output else None,
-            audio_source_for_mux=Path(args.audio_source).expanduser().resolve() if args.audio_source else None,
+            out_video_path=final_path,
+            audio_source_for_mux=Path(args.audio_source).expanduser().resolve(),
             note=args.note,
             fps=int(args.fps),
             max_seconds=float(args.max_seconds),

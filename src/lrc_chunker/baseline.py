@@ -6,7 +6,7 @@ from pathlib import Path
 from .alignment import AlignmentConfig, align_lyrics, build_alignment_payload, default_alignment_output
 from .chunking import ChunkingConfig, build_chunks
 from .lrc import parse_lrc
-from .utils import write_json
+from .utils import safe_stem, write_json
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,11 +32,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--apply-clamp-max", action="store_true", default=True)
     parser.add_argument("--no-apply-clamp-max", dest="apply_clamp_max", action="store_false")
     parser.add_argument("--denoiser", type=str, default="auto")
+    parser.add_argument("--denoiser-output", type=str, default="")
+    parser.add_argument("--only-voice-freq", action="store_true")
     parser.add_argument("--alignment-backend", choices=["stable_ts", "lrc"], default="stable_ts")
     parser.add_argument("--allow-lrc-fallback", action="store_true")
     parser.add_argument("--artifacts-dir", type=str, default="artifacts")
     parser.add_argument("-o", "--output", type=str, default="")
     return parser
+
+
+def _default_denoiser_output(artifacts_dir: str, audio_path: str, denoiser: str) -> str:
+    requested = str(denoiser or "").strip().lower()
+    if requested in {"", "none", "off", "false", "0"}:
+        return ""
+    return str(Path(artifacts_dir) / "denoised" / f"{safe_stem(audio_path)}_demucs_vocals.wav")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -50,8 +59,10 @@ def main(argv: list[str] | None = None) -> int:
         language=args.language,
         vad_threshold=float(args.vad_threshold),
         denoiser=args.denoiser,
+        denoiser_output_path=args.denoiser_output or _default_denoiser_output(args.artifacts_dir, args.audio, args.denoiser),
         alignment_backend=args.alignment_backend,
         allow_lrc_fallback=bool(args.allow_lrc_fallback),
+        only_voice_freq=bool(args.only_voice_freq),
     )
     chunk_config = ChunkingConfig(
         max_gap=float(args.max_gap),

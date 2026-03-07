@@ -12,6 +12,17 @@ conda activate lrc-chunker-py38
 pip install -e .
 ```
 
+如果当前机器没有 `conda`，可先本地安装 Miniconda：
+
+```bash
+curl -fsSL -o Miniconda3-latest-Linux-x86_64.sh https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+bash Miniconda3-latest-Linux-x86_64.sh -b -p "$PWD/miniconda3"
+"$PWD/miniconda3/bin/conda" tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
+"$PWD/miniconda3/bin/conda" tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
+"$PWD/miniconda3/bin/conda" env create -f environment.yml
+"$PWD/miniconda3/bin/conda" run -n lrc-chunker-py38 pip install -e .
+```
+
 说明：
 
 - `stable-ts 2.19.1` 官方声明 `Requires: Python >=3.8`
@@ -20,6 +31,8 @@ pip install -e .
 - `librosa 0.10.2.post1` 支持 Python 3.8
 - `matplotlib` 最新版已经要求 Python 3.10，因此这里固定到 `3.7.5`
 - `imageio` 最新版已经要求 Python 3.9，因此这里固定到 `2.31.5`
+- `imageio-ffmpeg 0.5.1` 用于 `imageio` 写出 mp4 预览视频
+- `environment.yml` 使用 `conda` 安装 Python / Torch / `conda-forge::ffmpeg`，使用 `pip` 安装其余 Python 包，以避免当前 conda 源缺失 `matplotlib 3.7.5`，并绕开 `pytorch` channel 上旧版 `ffmpeg` 的动态库问题
 
 ## 项目结构
 
@@ -29,17 +42,37 @@ pip install -e .
 - `motion_m1_demucs_benchmark.py`: Stage 5 + Stage 6，M1 音频特征、单视频、2x2 对比视频
 - `src/lrc_chunker/`: 核心模块
 - `docs/`: 恢复要求和验收标准
+- `examples/`: 可同步的轻量样例输入（当前包含 `Memories - Conan Gray.lrc`）
 
 ## 标准流程
 
 ```powershell
-python lyrics_chunker_baseline.py "song.wav" "lyrics.lrc" --model small.en --language en
-python word_timing_refine.py "artifacts/alignment/chunking_song_small.en.json" --audio-mix "song.wav" --profile balanced
-python motion_m0_extract.py "artifacts/refinement/chunking_song_small.en_wordref_balanced.json"
-python motion_m1_demucs_benchmark.py "artifacts/m0/features_text_timing_song_small.en_wordref_balanced.json" --audio "song.wav" --run-dir "artifacts/m1/song_small_en"
+python lyrics_chunker_baseline.py "song.wav" "lyrics.lrc" --language en
+python word_timing_refine.py "artifacts/alignment/chunking_song_small.en.json" --audio-mix "song.wav"
+python motion_m0_extract.py "artifacts/refinement/chunking_song_small.en_wordref_slow_attack.json"
+python motion_m1_demucs_benchmark.py "artifacts/m0/features_text_timing_chunking_song_small.en_wordref_slow_attack.json" --audio "song.wav" --run-dir "artifacts/m1/song_small_en"
 ```
 
-如果已有人声 stem，可在 Stage 3 / Stage 5 额外传入 `--audio-vocals` 或 `--vocals-path`。
+说明：
+
+- Stage 2 默认会在 `artifacts/denoised/` 生成 `*_demucs_vocals.wav`，前提是 `stable-ts` 能使用已安装的 `demucs`
+- Stage 2 的词文本现在完全来自 `LRC`，仅使用对齐模型输出词级时间戳
+- Stage 3 默认使用 `slow_attack` profile，并默认启用 `LRC` 行首软锚点；`--audio-vocals` 和 Stage 5 的 `--vocals-path` 现在都支持省略，脚本会自动从前一阶段 JSON 元数据里复用 stem
+- Stage 5 现在只保留带原音频的最终预览视频，不再落地无声 `raw.mp4`
+- 测试/预览视频默认时长现在统一为 `60s`
+- 如果你已有外部人声 stem，仍可手动传入 `--audio-vocals` 或 `--vocals-path`
+
+## 已验证流程
+
+本仓库已在本地 `Miniconda + conda Python 3.8` 环境实测通过以下真实样本：
+
+- 输入：本地音频 `Memories - Conan Gray.wav`（不入库）
+- 输入：仓库内 LRC `examples/Memories - Conan Gray.lrc`
+- 产物：`artifacts/alignment/chunking_Memories_-_Conan_Gray_small.en.json`
+- 产物：`artifacts/denoised/Memories_-_Conan_Gray_demucs_vocals.wav`
+- 产物：`artifacts/refinement/chunking_Memories_-_Conan_Gray_small.en_wordref_slow_attack.json`
+- 产物：`artifacts/m0/features_text_timing_chunking_Memories_-_Conan_Gray_small.en_wordref_slow_attack.json`
+- 产物：`artifacts/m1/Memories_small_en/m1_demucs_parameter_preview.mp4`
 
 ## 输出目录
 

@@ -3,9 +3,11 @@
 import argparse
 from copy import deepcopy
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Optional
 
-from .utils import FUNCTION_WORDS, median, read_json, safe_stem, tokenize, write_json
+import numpy as np
+
+from .utils import FUNCTION_WORDS, find_payload_vocals_path, median, percentile, read_json, safe_stem, tokenize, write_json
 
 
 PROFILES: Dict[str, Dict[str, float]] = {
@@ -20,6 +22,11 @@ PROFILES: Dict[str, Dict[str, float]] = {
         "onset_weight": 1.0,
         "prefer_future_penalty": 0.25,
         "force_forward_min_gap": 0.05,
+        "breath_gap_min": 0.14,
+        "breath_scan_max": 0.22,
+        "breath_flatness_max": 0.55,
+        "breath_rms_ratio": 0.38,
+        "breath_min_delay": 0.03,
     },
     "balanced": {
         "start_shift_max": 0.14,
@@ -32,6 +39,28 @@ PROFILES: Dict[str, Dict[str, float]] = {
         "onset_weight": 1.00,
         "prefer_future_penalty": 0.45,
         "force_forward_min_gap": 0.05,
+        "breath_gap_min": 0.12,
+        "breath_scan_max": 0.24,
+        "breath_flatness_max": 0.58,
+        "breath_rms_ratio": 0.35,
+        "breath_min_delay": 0.035,
+    },
+    "slow_attack": {
+        "start_shift_max": 0.40,
+        "start_back_max": 0.03,
+        "boundary_shift_max": 0.12,
+        "min_word_dur": 0.10,
+        "func_max_dur": 0.52,
+        "func_ratio_max": 2.1,
+        "keep_weight": 0.35,
+        "onset_weight": 1.00,
+        "prefer_future_penalty": 1.55,
+        "force_forward_min_gap": 0.05,
+        "breath_gap_min": 0.12,
+        "breath_scan_max": 0.60,
+        "breath_flatness_max": 0.45,
+        "breath_rms_ratio": 0.70,
+        "breath_min_delay": 0.10,
     },
     "aggressive": {
         "start_shift_max": 0.18,
@@ -44,6 +73,11 @@ PROFILES: Dict[str, Dict[str, float]] = {
         "onset_weight": 1.0,
         "prefer_future_penalty": 0.80,
         "force_forward_min_gap": 0.04,
+        "breath_gap_min": 0.10,
+        "breath_scan_max": 0.26,
+        "breath_flatness_max": 0.62,
+        "breath_rms_ratio": 0.32,
+        "breath_min_delay": 0.03,
     },
     "rap_snap": {
         "start_shift_max": 0.24,
@@ -56,6 +90,11 @@ PROFILES: Dict[str, Dict[str, float]] = {
         "onset_weight": 1.00,
         "prefer_future_penalty": 1.10,
         "force_forward_min_gap": 0.05,
+        "breath_gap_min": 0.08,
+        "breath_scan_max": 0.18,
+        "breath_flatness_max": 0.68,
+        "breath_rms_ratio": 0.28,
+        "breath_min_delay": 0.02,
     },
 }
 
@@ -66,16 +105,73 @@ def _iter_words(payload: dict) -> Iterable[dict]:
             yield word
 
 
-def _load_onsets(*audio_paths: str, sr: int, hop_length: int) -> List[float]:
+def _sync_top_level_words(refined: dict) -> None:
+    # Keep payload["words"] consistent with the per-chunk timings used downstream.
+    refined["words"] = [deepcopy(word) for word in _iter_words(refined)]
+
+
+def _line_timestamp_map(payload: dict) -> Dict[int, float]:
+    out: Dict[int, float] = {}
+    for raw in payload.get("lines", []) or []:
+        try:
+            line_id = int(raw.get("line_id"))
+            timestamp = float(raw.get("timestamp"))
+        except (TypeError, ValueError):
+            continue
+        out[line_id] = timestamp
+    return out
+
+
+def _line_first_word_positions(payload: dict) -> Dict[int, tuple[int, int]]:
+    out: Dict[int, tuple[int, int]] = {}
+    for chunk_idx, chunk in enumerate(payload.get("chunks", []) or []):
+        for word_idx, word in enumerate(chunk.get("words", []) or []):
+            try:
+                line_id = int(word.get("line_id"))
+            except (TypeError, ValueError):
+                continue
+            if line_id in out:
+                continue
+            if not str(word.get("text") or "").strip():
+                continue
+            out[line_id] = (chunk_idx, word_idx)
+    return out
+
+
+def _line_word_refs(payload: dict) -> Dict[int, List[dict]]:
+    out: Dict[int, List[dict]] = {}
+    for word in _iter_words(payload):
+        try:
+            line_id = int(word.get("line_id"))
+        except (TypeError, ValueError):
+            continue
+        out.setdefault(line_id, []).append(word)
+    return out
+
+
+def _load_refine_signals(*audio_paths: str, sr: int, hop_length: int) -> Dict[str, object]:
     valid_paths = [path for path in audio_paths if path]
     if not valid_paths:
-        return []
+        return {
+            "onsets": [],
+            "frame_times": np.asarray([], dtype=np.float64),
+            "rms": np.asarray([], dtype=np.float64),
+            "flatness": np.asarray([], dtype=np.float64),
+            "global_rms_ref": 0.0,
+        }
     try:
         import librosa  # type: ignore
     except Exception:
-        return []
+        return {
+            "onsets": [],
+            "frame_times": np.asarray([], dtype=np.float64),
+            "rms": np.asarray([], dtype=np.float64),
+            "flatness": np.asarray([], dtype=np.float64),
+            "global_rms_ref": 0.0,
+        }
 
     onset_times: List[float] = []
+    analysis_path = valid_paths[0]
     for audio_path in valid_paths:
         y, use_sr = librosa.load(audio_path, sr=sr, mono=True)
         onset_env = librosa.onset.onset_strength(y=y, sr=use_sr, hop_length=hop_length)
@@ -87,7 +183,18 @@ def _load_onsets(*audio_paths: str, sr: int, hop_length: int) -> List[float]:
             backtrack=False,
         )
         onset_times.extend(float(t) for t in librosa.frames_to_time(frames, sr=use_sr, hop_length=hop_length))
-    return sorted(set(round(t, 3) for t in onset_times))
+    y, use_sr = librosa.load(analysis_path, sr=sr, mono=True)
+    rms = librosa.feature.rms(y=y, hop_length=hop_length)[0]
+    flatness = librosa.feature.spectral_flatness(y=y, hop_length=hop_length)[0]
+    frame_times = librosa.frames_to_time(np.arange(len(rms)), sr=use_sr, hop_length=hop_length)
+    non_silent = [float(v) for v in rms if float(v) > 1e-6]
+    return {
+        "onsets": sorted(set(round(t, 3) for t in onset_times)),
+        "frame_times": np.asarray(frame_times, dtype=np.float64),
+        "rms": np.asarray(rms, dtype=np.float64),
+        "flatness": np.asarray(flatness, dtype=np.float64),
+        "global_rms_ref": percentile(non_silent, 0.35) if non_silent else 0.0,
+    }
 
 
 def _nearest_candidates(onsets: List[float], t: float, start_back_max: float, start_shift_max: float) -> List[float]:
@@ -99,9 +206,153 @@ def _nearest_candidates(onsets: List[float], t: float, start_back_max: float, st
     return sorted(set(cands))
 
 
+def _lrc_anchor_candidates(
+    onsets: List[float],
+    target: float,
+    current_start: float,
+    start_back_max: float,
+    anchor_window: float,
+) -> List[float]:
+    cands = [current_start, target]
+    for onset in onsets:
+        diff = onset - target
+        if -start_back_max <= diff <= anchor_window:
+            cands.append(onset)
+    return sorted(set(cands))
+
+
+def _select_lrc_anchor_target(
+    onsets: List[float],
+    current_start: float,
+    line_timestamp: float,
+    *,
+    start_back_max: float,
+    anchor_window: float,
+    anchor_weight: float,
+    keep_weight: float,
+) -> float:
+    candidates = _lrc_anchor_candidates(onsets, line_timestamp, current_start, start_back_max, anchor_window)
+    best = current_start
+    best_score = float("inf")
+    for cand in candidates:
+        score = anchor_weight * abs(cand - line_timestamp) + keep_weight * abs(cand - current_start)
+        if score < best_score:
+            best_score = score
+            best = cand
+    return best
+
+
 def _is_function_word(text: str) -> bool:
     toks = [tok.lower() for tok in tokenize(text) if any(ch.isalnum() for ch in tok)]
     return bool(toks) and all(tok in FUNCTION_WORDS for tok in toks)
+
+
+def _find_voiced_start(
+    frame_times: np.ndarray,
+    rms: np.ndarray,
+    flatness: np.ndarray,
+    start: float,
+    search_end: float,
+    global_rms_ref: float,
+    params: Dict[str, float],
+) -> Optional[float]:
+    if frame_times.size == 0 or rms.size == 0 or flatness.size == 0:
+        return None
+    mask = (frame_times >= float(start)) & (frame_times <= float(search_end))
+    if not np.any(mask):
+        return None
+    local_times = frame_times[mask]
+    local_rms = rms[mask]
+    local_flatness = flatness[mask]
+    local_peak = float(np.max(local_rms)) if local_rms.size else 0.0
+    if local_peak <= 0.0:
+        return None
+    rms_floor = max(float(global_rms_ref) * float(params["breath_rms_ratio"]), local_peak * float(params["breath_rms_ratio"]))
+    flatness_max = float(params["breath_flatness_max"])
+    for t, amp, flat in zip(local_times, local_rms, local_flatness):
+        if float(amp) >= rms_floor and float(flat) <= flatness_max:
+            return float(t)
+    return None
+
+
+def _apply_breath_guard(
+    best_start: float,
+    orig_end: float,
+    prev_end: float,
+    idx: int,
+    frame_times: np.ndarray,
+    rms: np.ndarray,
+    flatness: np.ndarray,
+    global_rms_ref: float,
+    params: Dict[str, float],
+) -> float:
+    gap_before = max(0.0, best_start - prev_end)
+    if idx > 0 and gap_before < float(params["breath_gap_min"]):
+        return best_start
+    search_end = min(orig_end, best_start + float(params["breath_scan_max"]))
+    voiced_start = _find_voiced_start(frame_times, rms, flatness, best_start, search_end, global_rms_ref, params)
+    if voiced_start is None:
+        return best_start
+    if voiced_start - best_start < float(params["breath_min_delay"]):
+        return best_start
+    return min(voiced_start, orig_end - float(params["min_word_dur"]))
+
+
+def _apply_line_anchor_warp(
+    words: List[dict],
+    target_start: float,
+    *,
+    anchor_span_words: int,
+    anchor_max_ratio: float,
+    min_delta: float,
+) -> float:
+    if not words:
+        return 0.0
+    first_start = float(words[0].get("start", 0.0))
+    raw_delta = float(target_start) - first_start
+    if abs(raw_delta) < min_delta:
+        return 0.0
+
+    if len(words) == 1:
+        orig_start = float(words[0].get("start", 0.0))
+        orig_end = float(words[0].get("end", orig_start))
+        words[0]["start"] = round(orig_start + raw_delta, 3)
+        words[0]["end"] = round(orig_end + raw_delta, 3)
+        return raw_delta
+
+    span_words = max(1, min(anchor_span_words, len(words)))
+    if span_words < len(words):
+        region_end = float(words[span_words].get("start", float(words[-1].get("end", first_start))))
+    else:
+        region_end = float(words[-1].get("end", first_start))
+    region_len = max(0.20, region_end - first_start)
+    max_delta = region_len * max(0.10, min(anchor_max_ratio, 0.95))
+    delta = max(-max_delta, min(max_delta, raw_delta))
+    if abs(delta) < min_delta:
+        return 0.0
+
+    originals = [
+        (
+            float(word.get("start", 0.0)),
+            float(word.get("end", float(word.get("start", 0.0)))),
+        )
+        for word in words
+    ]
+
+    def warp(t: float) -> float:
+        if t <= first_start:
+            return t + delta
+        if t >= region_end:
+            return t
+        ratio = (t - first_start) / region_len
+        return t + delta * (1.0 - ratio)
+
+    for word, (orig_start, orig_end) in zip(words, originals):
+        if orig_start < region_end:
+            word["start"] = round(warp(orig_start), 3)
+        if orig_end < region_end:
+            word["end"] = round(warp(orig_end), 3)
+    return float(words[0].get("start", first_start)) - first_start
 
 
 def refine_payload(
@@ -110,6 +361,13 @@ def refine_payload(
     profile: str,
     audio_mix: str = "",
     audio_vocals: str = "",
+    use_lrc_anchors: bool = False,
+    lrc_anchor_window: float = 0.18,
+    lrc_anchor_weight: float = 3.5,
+    lrc_anchor_keep_weight: float = 0.30,
+    lrc_anchor_min_delta: float = 0.04,
+    lrc_anchor_span_words: int = 1,
+    lrc_anchor_max_ratio: float = 0.15,
     sr: int = 22050,
     hop_length: int = 256,
     early_thr: float = 0.05,
@@ -123,18 +381,28 @@ def refine_payload(
                 params[key] = float(value)
 
     refined = deepcopy(payload)
-    onsets = _load_onsets(audio_mix, audio_vocals, sr=sr, hop_length=hop_length)
+    signals = _load_refine_signals(audio_vocals, audio_mix, sr=sr, hop_length=hop_length)
+    onsets = list(signals["onsets"])
+    frame_times = np.asarray(signals["frame_times"], dtype=np.float64)
+    rms = np.asarray(signals["rms"], dtype=np.float64)
+    flatness = np.asarray(signals["flatness"], dtype=np.float64)
+    global_rms_ref = float(signals["global_rms_ref"])
     changes = 0
     total_shift = 0.0
+    breath_guard_moves = 0
+    lrc_anchor_moves = 0
     durations: List[float] = [max(0.0, float(w.get("end", 0.0)) - float(w.get("start", 0.0))) for w in _iter_words(payload)]
     median_word_dur = max(params["min_word_dur"], median(durations) or params["min_word_dur"])
+    line_timestamps = _line_timestamp_map(payload) if use_lrc_anchors else {}
 
-    for chunk in refined.get("chunks", []):
-        prev_end = float(chunk.get("start", 0.0))
+    for chunk_idx, chunk in enumerate(refined.get("chunks", [])):
+        chunk_start = float(chunk.get("start", 0.0))
+        prev_end = chunk_start
         words = chunk.get("words", []) or []
         for idx, word in enumerate(words):
             orig_start = float(word.get("start", 0.0))
             orig_end = float(word.get("end", orig_start))
+            prev_anchor = chunk_start if idx == 0 else prev_end
             cands = _nearest_candidates(onsets, orig_start, params["start_back_max"], params["start_shift_max"])
             best_start = orig_start
             best_score = float("inf")
@@ -150,7 +418,21 @@ def refine_payload(
 
             if abs(best_start - orig_start) < early_thr:
                 best_start = orig_start
-            best_start = max(prev_end, best_start)
+            best_start = max(prev_anchor, best_start)
+            guarded_start = _apply_breath_guard(
+                best_start,
+                orig_end,
+                prev_anchor,
+                idx,
+                frame_times,
+                rms,
+                flatness,
+                global_rms_ref,
+                params,
+            )
+            if guarded_start > best_start + 1e-6:
+                breath_guard_moves += 1
+            best_start = max(prev_anchor, guarded_start)
 
             dur = max(params["min_word_dur"], orig_end - orig_start)
             if _is_function_word(str(word.get("text") or "")) and dur >= func_long_thr:
@@ -170,6 +452,35 @@ def refine_payload(
             word["end"] = round(best_end, 3)
             prev_end = float(word["end"]) + params["force_forward_min_gap"]
 
+        if words:
+            chunk["start"] = float(words[0]["start"])
+            chunk["end"] = float(words[-1]["end"])
+
+    if use_lrc_anchors:
+        for line_id, words in _line_word_refs(refined).items():
+            if line_id not in line_timestamps or not words:
+                continue
+            target_start = _select_lrc_anchor_target(
+                onsets,
+                float(words[0].get("start", 0.0)),
+                line_timestamps[line_id],
+                start_back_max=float(params["start_back_max"]),
+                anchor_window=float(lrc_anchor_window),
+                anchor_weight=float(lrc_anchor_weight),
+                keep_weight=float(lrc_anchor_keep_weight),
+            )
+            applied = _apply_line_anchor_warp(
+                words,
+                target_start,
+                anchor_span_words=int(lrc_anchor_span_words),
+                anchor_max_ratio=float(lrc_anchor_max_ratio),
+                min_delta=float(lrc_anchor_min_delta),
+            )
+            if abs(applied) > 1e-6:
+                lrc_anchor_moves += 1
+
+    for chunk in refined.get("chunks", []):
+        words = chunk.get("words", []) or []
         if words:
             chunk["start"] = float(words[0]["start"])
             chunk["end"] = float(words[-1]["end"])
@@ -196,10 +507,20 @@ def refine_payload(
         "sr": sr,
         "hop_length": hop_length,
         "onset_count": len(onsets),
+        "breath_guard_moves": breath_guard_moves,
+        "use_lrc_anchors": use_lrc_anchors,
+        "lrc_anchor_moves": lrc_anchor_moves,
+        "lrc_anchor_window": lrc_anchor_window,
+        "lrc_anchor_weight": lrc_anchor_weight,
+        "lrc_anchor_keep_weight": lrc_anchor_keep_weight,
+        "lrc_anchor_min_delta": lrc_anchor_min_delta,
+        "lrc_anchor_span_words": lrc_anchor_span_words,
+        "lrc_anchor_max_ratio": lrc_anchor_max_ratio,
         "words_changed": changes,
         "mean_abs_start_shift": round(total_shift / max(1, changes), 4),
         "median_word_duration_before": round(median_word_dur, 4),
     }
+    _sync_top_level_words(refined)
     refined.setdefault("meta", {})
     refined["meta"]["word_refine"] = report
     return refined, report
@@ -210,7 +531,15 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("chunking_json", type=str)
     parser.add_argument("--audio-mix", type=str, default="")
     parser.add_argument("--audio-vocals", type=str, default="")
-    parser.add_argument("--profile", choices=sorted(PROFILES), default="balanced")
+    parser.add_argument("--profile", choices=sorted(PROFILES), default="slow_attack")
+    parser.add_argument("--use-lrc-anchors", dest="use_lrc_anchors", action="store_true", default=True)
+    parser.add_argument("--no-lrc-anchors", dest="use_lrc_anchors", action="store_false")
+    parser.add_argument("--lrc-anchor-window", type=float, default=0.18)
+    parser.add_argument("--lrc-anchor-weight", type=float, default=3.5)
+    parser.add_argument("--lrc-anchor-keep-weight", type=float, default=0.30)
+    parser.add_argument("--lrc-anchor-min-delta", type=float, default=0.04)
+    parser.add_argument("--lrc-anchor-span-words", type=int, default=1)
+    parser.add_argument("--lrc-anchor-max-ratio", type=float, default=0.15)
     parser.add_argument("--sr", type=int, default=22050)
     parser.add_argument("--hop-length", type=int, default=256)
     parser.add_argument("--early-thr", type=float, default=0.05)
@@ -234,11 +563,19 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     payload = read_json(Path(args.chunking_json))
+    audio_vocals = args.audio_vocals or find_payload_vocals_path(payload)
     refined, report = refine_payload(
         payload,
         profile=args.profile,
         audio_mix=args.audio_mix,
-        audio_vocals=args.audio_vocals,
+        audio_vocals=audio_vocals,
+        use_lrc_anchors=bool(args.use_lrc_anchors),
+        lrc_anchor_window=float(args.lrc_anchor_window),
+        lrc_anchor_weight=float(args.lrc_anchor_weight),
+        lrc_anchor_keep_weight=float(args.lrc_anchor_keep_weight),
+        lrc_anchor_min_delta=float(args.lrc_anchor_min_delta),
+        lrc_anchor_span_words=int(args.lrc_anchor_span_words),
+        lrc_anchor_max_ratio=float(args.lrc_anchor_max_ratio),
         sr=int(args.sr),
         hop_length=int(args.hop_length),
         early_thr=float(args.early_thr),

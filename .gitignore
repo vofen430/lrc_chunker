@@ -7,3 +7,8 @@
 .tmp_manual_tests_final/
 artifacts/
 pytest-cache-files-*/
+*.egg-info/
+*.wav
+*.mp3
+miniconda3/
+Miniconda3-*.sh

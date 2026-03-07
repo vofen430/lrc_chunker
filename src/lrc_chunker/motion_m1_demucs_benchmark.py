@@ -25,7 +25,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import subprocess
+import tempfile
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
@@ -468,6 +470,43 @@ def mux_audio_with_ffmpeg(video_path: Path, audio_path: Path, out_path: Path, du
     subprocess.run(cmd, check=True)
 
 
+def _muxed_temp_path(final_path: Path) -> Path:
+    final_path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=f".{final_path.stem}_", suffix=".raw.mp4", dir=str(final_path.parent))
+    os.close(fd)
+    return Path(tmp_name)
+
+
+def render_single_preview_with_audio(
+    *,
+    m0_path: Path,
+    m1_mix_path: Path,
+    m1_demucs_path: Path,
+    audio_mix_path: Path,
+    audio_vocals_path: Path,
+    out_video_path: Path,
+    fps: int,
+    max_seconds: float,
+    comparison_note: str = "",
+) -> None:
+    temp_raw = _muxed_temp_path(out_video_path)
+    try:
+        render_single_preview(
+            m0_path=m0_path,
+            m1_mix_path=m1_mix_path,
+            m1_demucs_path=m1_demucs_path,
+            audio_mix_path=audio_mix_path,
+            audio_vocals_path=audio_vocals_path,
+            out_video_path=temp_raw,
+            fps=fps,
+            max_seconds=max_seconds,
+            comparison_note=comparison_note,
+        )
+        mux_audio_with_ffmpeg(temp_raw, audio_mix_path, out_video_path, duration_sec=max_seconds)
+    finally:
+        temp_raw.unlink(missing_ok=True)
+
+
 def compose_quad_video(
     *,
     inputs: List[Path],
@@ -545,6 +584,32 @@ def compose_quad_video(
         mux_audio_with_ffmpeg(out_raw_path, audio_source_for_mux, out_mux_path, duration_sec=max_seconds)
 
 
+def compose_quad_video_with_audio(
+    *,
+    inputs: List[Path],
+    labels: List[str],
+    out_video_path: Path,
+    audio_source_for_mux: Path,
+    note: str = "",
+    fps: int = 8,
+    max_seconds: float = 60.0,
+) -> None:
+    temp_raw = _muxed_temp_path(out_video_path)
+    try:
+        compose_quad_video(
+            inputs=inputs,
+            labels=labels,
+            out_raw_path=temp_raw,
+            out_mux_path=out_video_path,
+            audio_source_for_mux=audio_source_for_mux,
+            note=note,
+            fps=fps,
+            max_seconds=max_seconds,
+        )
+    finally:
+        temp_raw.unlink(missing_ok=True)
+
+
 def _single_parser(subparsers) -> None:
     p = subparsers.add_parser("single", help="render one single-preview parameter video")
     p.add_argument("m0", type=str)
@@ -590,28 +655,25 @@ def main() -> int:
 
     if args.cmd == "single":
         out_path = Path(args.output).expanduser().resolve()
-        render_single_preview(
+        final_path = Path(args.mux_output).expanduser().resolve() if args.mux_output else out_path
+        render_single_preview_with_audio(
             m0_path=Path(args.m0).expanduser().resolve(),
             m1_mix_path=Path(args.m1_mix).expanduser().resolve(),
             m1_demucs_path=Path(args.m1_demucs).expanduser().resolve(),
             audio_mix_path=Path(args.audio_mix).expanduser().resolve(),
             audio_vocals_path=Path(args.audio_vocals).expanduser().resolve(),
-            out_video_path=out_path,
+            out_video_path=final_path,
             fps=int(args.fps),
             max_seconds=float(args.max_seconds),
             comparison_note=args.comparison_note,
         )
-        if args.mux_output:
-            mux_audio_with_ffmpeg(
-                out_path,
-                Path(args.audio_mix).expanduser().resolve(),
-                Path(args.mux_output).expanduser().resolve(),
-                duration_sec=float(args.max_seconds),
-            )
         return 0
 
     if args.cmd == "quad":
-        compose_quad_video(
+        if not args.audio_source:
+            raise ValueError("quad requires --audio-source so only muxed output is generated.")
+        final_path = Path(args.mux_output).expanduser().resolve() if args.mux_output else Path(args.output).expanduser().resolve()
+        compose_quad_video_with_audio(
             inputs=[
                 Path(args.in1).expanduser().resolve(),
                 Path(args.in2).expanduser().resolve(),
@@ -619,9 +681,8 @@ def main() -> int:
                 Path(args.in4).expanduser().resolve(),
             ],
             labels=[args.label1, args.label2, args.label3, args.label4],
-            out_raw_path=Path(args.output).expanduser().resolve(),
-            out_mux_path=Path(args.mux_output).expanduser().resolve() if args.mux_output else None,
-            audio_source_for_mux=Path(args.audio_source).expanduser().resolve() if args.audio_source else None,
+            out_video_path=final_path,
+            audio_source_for_mux=Path(args.audio_source).expanduser().resolve(),
             note=args.note,
             fps=int(args.fps),
             max_seconds=float(args.max_seconds),
@@ -633,4 +694,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-
