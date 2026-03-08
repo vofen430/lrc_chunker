@@ -181,6 +181,28 @@ cd /home/dev/workspace/lrc_chunker
 - 不包含 `M0/M1/video` 交付目标
 - 不要求目标机再额外安装 Python 或补充旁路文件
 
+## GitHub Actions Windows Build
+
+如果本机不希望安装 Windows 打包依赖，可直接使用 GitHub Actions 的 Windows runner 构建 `.exe`。
+
+工作流文件：
+
+- [.github/workflows/build-windows-onefile.yml](/home/dev/workspace/lrc_chunker/.github/workflows/build-windows-onefile.yml)
+
+行为：
+
+- 在 `windows-latest` runner 上创建 `conda` 环境
+- 安装项目依赖与 `pyinstaller`
+- 运行 `pytest`
+- 构建 `lrc-processor-onefile.exe`
+- 运行 `version` 与 `self-test` 烟测
+- 上传 artifact：`lrc-processor-onefile-windows-x86_64.exe`
+- 若推送的是 `v*` tag，则自动附到 GitHub Release
+
+Windows 构建脚本：
+
+- [build_external_onefile.ps1](/home/dev/workspace/lrc_chunker/tools/build_external_onefile.ps1)
+
 ## Accepted JSON Formats
 
 ## 1. Single-file `request.json`

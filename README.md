@@ -122,3 +122,10 @@ cd /home/dev/workspace/lrc_chunker
 
 这个 onefile 只面向外部 LRC 处理链路，不尝试把 `M0/M1/video` 全链路一起塞进同一个交付文件。
 
+如果你本机不想装 Windows 依赖链，仓库已提供 GitHub Actions 的 Windows 打包工作流：
+
+- 工作流文件：[build-windows-onefile.yml](/home/dev/workspace/lrc_chunker/.github/workflows/build-windows-onefile.yml)
+- 手动触发：GitHub `Actions` -> `build-windows-onefile` -> `Run workflow`
+- 产物：`lrc-processor-onefile-windows-x86_64.exe`
+- 打 `v*` tag 时，会自动把该 `.exe` 附到 GitHub Release
+
