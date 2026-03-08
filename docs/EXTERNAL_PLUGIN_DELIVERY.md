@@ -198,6 +198,7 @@ cd /home/dev/workspace/lrc_chunker
 - 运行 `version` 与 `self-test` 烟测
 - 上传 artifact：`lrc-processor-onefile-windows-x86_64.exe`
 - 若推送的是 `v*` tag，则自动附到 GitHub Release
+- 若手动触发 workflow 并填写 `release_tag`，也会自动创建/更新对应 GitHub Release 并附上 `.exe`
 
 Windows 构建脚本：
 

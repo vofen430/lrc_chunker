@@ -2,6 +2,11 @@ name: build-windows-onefile
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional release tag to publish, e.g. v0.1.1"
+        required: false
+        type: string
   push:
     tags:
       - "v*"
@@ -61,9 +66,23 @@ jobs:
           path: dist/lrc-processor-onefile-windows-x86_64.exe
           if-no-files-found: error
 
+      - name: Resolve Release Tag
+        id: release_tag
+        shell: bash -el {0}
+        run: |
+          TAG=""
+          if [[ "${GITHUB_REF:-}" == refs/tags/v* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+          elif [[ -n "${{ github.event.inputs.release_tag || '' }}" ]]; then
+            TAG="${{ github.event.inputs.release_tag }}"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Publish Release Asset
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: steps.release_tag.outputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           files: dist/lrc-processor-onefile-windows-x86_64.exe
           generate_release_notes: true

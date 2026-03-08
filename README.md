@@ -128,4 +128,5 @@ cd /home/dev/workspace/lrc_chunker
 - 手动触发：GitHub `Actions` -> `build-windows-onefile` -> `Run workflow`
 - 产物：`lrc-processor-onefile-windows-x86_64.exe`
 - 打 `v*` tag 时，会自动把该 `.exe` 附到 GitHub Release
+- 手动触发时，也可填写 `release_tag`，例如 `v0.1.1`，工作流会自动创建/更新对应 release 并附上 `.exe`
 
