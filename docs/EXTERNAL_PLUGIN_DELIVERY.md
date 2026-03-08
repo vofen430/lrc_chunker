@@ -156,6 +156,31 @@ lrc-processor batch-folder --input-dir "D:/music" --output-dir "D:/out"
 - 输出新 LRC 到 `output-dir`
 - 写 `batch_summary.json`
 
+## Recommended Onefile Packaging
+
+稳定交付路径使用专门的 external CLI onefile 构建，而不是把整项目所有能力一起塞进一个可执行文件。
+
+构建命令：
+
+```bash
+cd /home/dev/workspace/lrc_chunker
+./tools/build_external_onefile.sh
+```
+
+构建后验证：
+
+```bash
+./dist/lrc-processor-onefile version
+./dist/lrc-processor-onefile self-test
+```
+
+说明：
+
+- 该 onefile 面向外部插件集成场景
+- 目标是 `LRC -> align -> chunk -> refine -> new LRC`
+- 不包含 `M0/M1/video` 交付目标
+- 不要求目标机再额外安装 Python 或补充旁路文件
+
 ## Accepted JSON Formats
 
 ## 1. Single-file `request.json`

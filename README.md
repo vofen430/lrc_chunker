@@ -111,3 +111,14 @@ python motion_m1_demucs_benchmark.py "artifacts/m0/features_text_timing_chunking
 - 不进入 `M0/M1/video` 链路
 - 新 LRC 只输出歌词 chunk 行；无时间戳行、非歌词行、译文行不写入结果
 
+交付可执行文件时，推荐使用专门的 external CLI onefile 构建：
+
+```bash
+cd /home/dev/workspace/lrc_chunker
+./tools/build_external_onefile.sh
+./dist/lrc-processor-onefile version
+./dist/lrc-processor-onefile self-test
+```
+
+这个 onefile 只面向外部 LRC 处理链路，不尝试把 `M0/M1/video` 全链路一起塞进同一个交付文件。
+

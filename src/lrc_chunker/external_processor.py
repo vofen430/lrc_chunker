@@ -802,8 +802,12 @@ def run_self_test() -> int:
     }
     required_modules = [
         ("stable_whisper", "stable-ts"),
+        ("whisper", "openai-whisper"),
+        ("torchaudio", "torchaudio"),
         ("librosa", "librosa"),
+        ("imageio_ffmpeg", "imageio-ffmpeg"),
         ("numpy", "numpy"),
+        ("demucs", "demucs"),
     ]
     exit_code = 0
     for module_name, label in required_modules:
