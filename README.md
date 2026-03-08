@@ -40,6 +40,7 @@ bash Miniconda3-latest-Linux-x86_64.sh -b -p "$PWD/miniconda3"
 - `word_timing_refine.py`: Stage 3，词级时间戳修正
 - `motion_m0_extract.py`: Stage 4，M0 文本/时序特征
 - `motion_m1_demucs_benchmark.py`: Stage 5 + Stage 6，M1 音频特征、单视频、2x2 对比视频
+- `lrc_external_processor.py`: 外部插件协议 CLI 包装层
 - `src/lrc_chunker/`: 核心模块
 - `docs/`: 恢复要求和验收标准
 - `examples/`: 可同步的轻量样例输入（当前包含 `Memories - Conan Gray.lrc`）
@@ -90,4 +91,23 @@ python motion_m1_demucs_benchmark.py "artifacts/m0/features_text_timing_chunking
 - `docs/REPRO_FULL_PARAMETERS.md`
 - `docs/VIDEO_MODULE_RESTORE_REQUIREMENTS.md`
 - `docs/PY38_DEPENDENCY_MATRIX.md`
+
+## 外部处理 CLI
+
+为外部插件接入新增了文件协议 CLI，推荐安装后通过 `lrc-processor` 调用；未重新安装 editable 环境前，也可直接运行 `python lrc_external_processor.py ...`。
+
+可用命令：
+
+- `-A launch --job-dir "D:/Jobs/job_001"`: 读取 `request.json`，快速校验并启动 detached worker
+- `version`: 输出版本号
+- `self-test`: 检查核心运行时依赖
+- `batch-folder --input-dir "D:/music" --output-dir "D:/out"`: 本地调试入口，按同 basename 匹配 `wav/mp3`
+
+行为约束：
+
+- 只有显式传 `-A` / `--ae` 时，才启用 AE 协议相关控制；默认启动不进入 AE 对接模式
+- 协议以 [EXTERNAL_LRC_PROCESS_PROTOCOL.md](/home/dev/workspace/lrc_chunker/EXTERNAL_LRC_PROCESS_PROTOCOL.md) 为准
+- worker 只跑 `LRC -> alignment -> chunking -> word refine -> chunk-LRC writer`
+- 不进入 `M0/M1/video` 链路
+- 新 LRC 只输出歌词 chunk 行；无时间戳行、非歌词行、译文行不写入结果
 

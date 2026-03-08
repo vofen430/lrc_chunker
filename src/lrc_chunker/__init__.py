@@ -4,6 +4,7 @@ __all__ = [
     "alignment",
     "baseline",
     "chunking",
+    "external_processor",
     "lrc",
     "m1_pipeline",
     "motion_m0_extract",

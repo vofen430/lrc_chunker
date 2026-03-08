@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -9,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from lrc_chunker.alignment import AlignmentConfig, _assign_aligned_words_to_lines, build_alignment_payload, fallback_align_from_lrc
 from lrc_chunker.chunking import ChunkingConfig, build_chunks
+from lrc_chunker.external_processor import _collect_folder_pairs, build_parser as build_external_parser, format_lrc_timestamp, load_job_request, main as external_main, render_chunk_lrc, run_job_dir
 from lrc_chunker.lrc import parse_lrc
 from lrc_chunker.models import LyricLine
 from lrc_chunker.motion_m0_extract import extract_m0_features
@@ -251,3 +253,203 @@ def test_refine_cli_defaults_to_small_flow_profile_and_lrc_anchors() -> None:
 
     assert args.profile == "slow_attack"
     assert args.use_lrc_anchors is True
+
+
+def test_format_lrc_timestamp_uses_millisecond_precision() -> None:
+    assert format_lrc_timestamp(62.345) == "[01:02.345]"
+
+
+def test_render_chunk_lrc_keeps_ground_truth_on_first_split_chunk() -> None:
+    payload = {
+        "lines": [
+            {"line_id": 0, "timestamp": 10.0, "text": "hello world again"},
+            {"line_id": 1, "timestamp": 15.0, "text": "later line"},
+        ],
+        "chunks": [
+            {
+                "chunk_id": 0,
+                "start": 10.120,
+                "end": 11.0,
+                "text": "hello world",
+                "line_ids": [0],
+                "words": [
+                    {"text": "hello", "start": 10.120, "end": 10.400, "line_id": 0},
+                    {"text": "world", "start": 10.410, "end": 10.900, "line_id": 0},
+                ],
+            },
+            {
+                "chunk_id": 1,
+                "start": 11.250,
+                "end": 11.700,
+                "text": "again",
+                "line_ids": [0],
+                "words": [
+                    {"text": "again", "start": 11.250, "end": 11.700, "line_id": 0},
+                ],
+            },
+            {
+                "chunk_id": 2,
+                "start": 15.100,
+                "end": 15.700,
+                "text": "later line",
+                "line_ids": [1],
+                "words": [
+                    {"text": "later", "start": 15.100, "end": 15.300, "line_id": 1},
+                    {"text": "line", "start": 15.320, "end": 15.700, "line_id": 1},
+                ],
+            },
+        ],
+    }
+
+    text, warnings = render_chunk_lrc(payload)
+
+    assert text.splitlines() == [
+        "[00:10.000]hello world",
+        "[00:11.250]again",
+        "[00:15.000]later line",
+    ]
+    assert warnings == []
+
+
+def test_load_job_request_reads_batch_manifest_and_preserves_order(tmp_path: Path) -> None:
+    audio1 = tmp_path / "a.wav"
+    audio2 = tmp_path / "b.mp3"
+    lrc1 = tmp_path / "a.lrc"
+    lrc2 = tmp_path / "b.lrc"
+    for path in (audio1, audio2, lrc1, lrc2):
+        path.write_text("x", encoding="utf-8")
+
+    job_dir = tmp_path / "job"
+    result_dir = job_dir / "results"
+    manifest_path = job_dir / "batch_pairs.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        (
+            "{\n"
+            '  "protocol_version": 1,\n'
+            '  "manifest_type": "ae_lrc_batch_pairs",\n'
+            '  "created_utc": "2026-03-07T00:00:00Z",\n'
+            '  "source": {"host": "after-effects", "panel": "LRC_Panel_Modular"},\n'
+            '  "batch": {"order_mode": "ui_order", "row_count": 3, "ready_count": 2, "skipped_count": 1},\n'
+            '  "items": [\n'
+            f'    {{"row_index": 2, "row_id": 22, "pair_state": "ready", "title": "", "artist": "", "lrc_path": "{lrc2.resolve().as_posix()}", "audio_path": "{audio2.resolve().as_posix()}"}},\n'
+            f'    {{"row_index": 1, "row_id": 11, "pair_state": "ready", "title": "", "artist": "", "lrc_path": "{lrc1.resolve().as_posix()}", "audio_path": "{audio1.resolve().as_posix()}"}}\n'
+            "  ],\n"
+            '  "skipped_rows": [{"row_index": 3, "row_id": 33, "pair_state": "missing_audio", "title": "", "artist": "", "lrc_path": "", "audio_path": "", "reason": "missing"}]\n'
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    (job_dir / "request.json").write_text(
+        (
+            "{\n"
+            '  "protocol_version": 1,\n'
+            '  "job_id": "job_1",\n'
+            '  "created_utc": "2026-03-07T00:00:00Z",\n'
+            f'  "input": {{"mode": "batch_manifest", "batch_manifest_path": "{manifest_path.resolve().as_posix()}"}},\n'
+            f'  "output": {{"result_dir": "{result_dir.resolve().as_posix()}"}},\n'
+            '  "options": {"mode": "default"},\n'
+            f'  "callback": {{"status_file": "{(job_dir / "status.json").resolve().as_posix()}", "result_file": "{(job_dir / "result.json").resolve().as_posix()}", "complete_flag": "{(job_dir / "complete.flag").resolve().as_posix()}", "failed_flag": "{(job_dir / "failed.flag").resolve().as_posix()}", "cancel_flag": "{(job_dir / "cancel.flag").resolve().as_posix()}"}}\n'
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    request = load_job_request(job_dir)
+
+    assert request.mode == "batch_manifest"
+    assert [pair.row_index for pair in request.pairs] == [2, 1]
+    assert Path(request.pairs[0].result_lrc_path).name.startswith("0002_")
+
+
+def test_collect_folder_pairs_matches_same_basename_and_prefers_wav(tmp_path: Path) -> None:
+    (tmp_path / "song.lrc").write_text("[00:01.000]song", encoding="utf-8")
+    (tmp_path / "song.wav").write_bytes(b"wav")
+    (tmp_path / "song.mp3").write_bytes(b"mp3")
+    (tmp_path / "other.lrc").write_text("[00:01.000]other", encoding="utf-8")
+
+    pairs = _collect_folder_pairs(tmp_path, tmp_path / "out")
+
+    assert len(pairs) == 1
+    assert pairs[0].audio_path.endswith("song.wav")
+
+
+def test_external_cli_requires_ae_flag_for_launch() -> None:
+    parser = build_external_parser()
+    args = parser.parse_args(["launch", "--job-dir", "/tmp/demo"])
+
+    assert args.ae is False
+    assert external_main(["launch", "--job-dir", "/tmp/demo"]) == 10
+
+
+def test_run_job_dir_writes_result_and_complete_flag(tmp_path: Path, monkeypatch) -> None:
+    from lrc_chunker import external_processor as ext
+
+    audio = tmp_path / "song.wav"
+    lrc = tmp_path / "song.lrc"
+    audio.write_bytes(b"fake")
+    lrc.write_text("[00:01.000]hello world", encoding="utf-8")
+    job_dir = tmp_path / "job"
+    result_dir = job_dir / "results"
+    manifest_path = job_dir / "batch_pairs.json"
+    manifest_path.parent.mkdir(parents=True)
+    manifest_path.write_text(
+        (
+            "{\n"
+            '  "protocol_version": 1,\n'
+            '  "manifest_type": "ae_lrc_batch_pairs",\n'
+            '  "created_utc": "2026-03-07T00:00:00Z",\n'
+            '  "source": {"host": "after-effects", "panel": "LRC_Panel_Modular"},\n'
+            '  "batch": {"order_mode": "ui_order", "row_count": 1, "ready_count": 1, "skipped_count": 0},\n'
+            '  "items": [\n'
+            f'    {{"row_index": 1, "row_id": 101, "pair_state": "ready", "title": "Song", "artist": "Artist", "lrc_path": "{lrc.resolve().as_posix()}", "audio_path": "{audio.resolve().as_posix()}"}}\n'
+            "  ],\n"
+            '  "skipped_rows": []\n'
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+    (job_dir / "request.json").write_text(
+        (
+            "{\n"
+            '  "protocol_version": 1,\n'
+            '  "job_id": "job_batch",\n'
+            '  "created_utc": "2026-03-07T00:00:00Z",\n'
+            f'  "input": {{"mode": "batch_manifest", "batch_manifest_path": "{manifest_path.resolve().as_posix()}"}},\n'
+            f'  "output": {{"result_dir": "{result_dir.resolve().as_posix()}"}},\n'
+            '  "options": {"mode": "default"},\n'
+            f'  "callback": {{"status_file": "{(job_dir / "status.json").resolve().as_posix()}", "result_file": "{(job_dir / "result.json").resolve().as_posix()}", "complete_flag": "{(job_dir / "complete.flag").resolve().as_posix()}", "failed_flag": "{(job_dir / "failed.flag").resolve().as_posix()}", "cancel_flag": "{(job_dir / "cancel.flag").resolve().as_posix()}"}}\n'
+            "}\n"
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_process_pair(pair, *, options, work_dir):
+        Path(pair.result_lrc_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(pair.result_lrc_path).write_text("[00:01.000]hello world\n", encoding="utf-8")
+        return {
+            "row_index": pair.row_index,
+            "row_id": pair.row_id,
+            "result_lrc_path": pair.result_lrc_path,
+            "input_line_count": 1,
+            "output_line_count": 1,
+            "chunk_count": 1,
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(ext, "process_pair_to_lrc", fake_process_pair)
+
+    code = run_job_dir(job_dir)
+
+    assert code == 0
+    assert (job_dir / "complete.flag").is_file()
+    result_payload = json.loads((job_dir / "result.json").read_text(encoding="utf-8"))
+    status_payload = json.loads((job_dir / "status.json").read_text(encoding="utf-8"))
+    assert result_payload["state"] == "completed"
+    assert status_payload["state"] == "completed"
+    assert status_payload["detail"]["items_total"] == 1
+    assert status_payload["detail"]["items_completed"] == 1
+    assert status_payload["detail"]["signals"]["is_terminal"] is True
+    assert status_payload["detail"]["signals"]["is_success"] is True
+    assert status_payload["detail"]["current_summary"] == "completed"
+    assert status_payload["detail"]["result_overview"]["items"][0]["result_lrc_path"].endswith(".lrc")
