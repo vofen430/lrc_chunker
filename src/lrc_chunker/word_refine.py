@@ -27,6 +27,7 @@ PROFILES: Dict[str, Dict[str, float]] = {
         "breath_flatness_max": 0.55,
         "breath_rms_ratio": 0.38,
         "breath_min_delay": 0.03,
+        "min_chunk_dur": 0.04,
     },
     "balanced": {
         "start_shift_max": 0.14,
@@ -44,6 +45,7 @@ PROFILES: Dict[str, Dict[str, float]] = {
         "breath_flatness_max": 0.58,
         "breath_rms_ratio": 0.35,
         "breath_min_delay": 0.035,
+        "min_chunk_dur": 0.04,
     },
     "slow_attack": {
         "start_shift_max": 0.40,
@@ -61,6 +63,7 @@ PROFILES: Dict[str, Dict[str, float]] = {
         "breath_flatness_max": 0.45,
         "breath_rms_ratio": 0.70,
         "breath_min_delay": 0.10,
+        "min_chunk_dur": 0.04,
     },
     "aggressive": {
         "start_shift_max": 0.18,
@@ -78,6 +81,7 @@ PROFILES: Dict[str, Dict[str, float]] = {
         "breath_flatness_max": 0.62,
         "breath_rms_ratio": 0.32,
         "breath_min_delay": 0.03,
+        "min_chunk_dur": 0.04,
     },
     "rap_snap": {
         "start_shift_max": 0.24,
@@ -95,6 +99,7 @@ PROFILES: Dict[str, Dict[str, float]] = {
         "breath_flatness_max": 0.68,
         "breath_rms_ratio": 0.28,
         "breath_min_delay": 0.02,
+        "min_chunk_dur": 0.04,
     },
 }
 
@@ -485,6 +490,18 @@ def refine_payload(
             chunk["start"] = float(words[0]["start"])
             chunk["end"] = float(words[-1]["end"])
 
+    original_chunks = payload.get("chunks", []) or []
+    original_positive_indices = [
+        idx
+        for idx, chunk in enumerate(original_chunks)
+        if float(chunk.get("end", chunk.get("start", 0.0))) > float(chunk.get("start", 0.0))
+    ]
+    original_zero_indices = {
+        idx
+        for idx, chunk in enumerate(original_chunks)
+        if float(chunk.get("end", chunk.get("start", 0.0))) <= float(chunk.get("start", 0.0))
+    }
+
     chunks = refined.get("chunks", []) or []
     for idx in range(len(chunks) - 1):
         current = chunks[idx]
@@ -498,6 +515,41 @@ def refine_payload(
             current_words[-1]["end"] = round(max(float(current_words[-1].get("start", next_start)), next_start), 3)
             current["end"] = float(current_words[-1]["end"])
             nxt["start"] = next_start
+
+    dropped_zero_chunks = 0
+    interior_zero_chunks_fixed = 0
+    if original_positive_indices:
+        keep_lo = original_positive_indices[0]
+        keep_hi = original_positive_indices[-1]
+        dropped_zero_chunks = keep_lo + max(0, len(chunks) - 1 - keep_hi)
+        chunks = chunks[keep_lo : keep_hi + 1]
+        refined["chunks"] = chunks
+        original_zero_indices = {idx - keep_lo for idx in original_zero_indices if keep_lo <= idx <= keep_hi}
+    else:
+        dropped_zero_chunks = len(chunks)
+        refined["chunks"] = []
+        chunks = []
+        original_zero_indices = set()
+
+    min_chunk_dur = float(params.get("min_chunk_dur", params["min_word_dur"]))
+    for idx, chunk in enumerate(chunks):
+        start = float(chunk.get("start", 0.0))
+        end = float(chunk.get("end", start))
+        if end > start and idx not in original_zero_indices:
+            continue
+        target_end = start + min_chunk_dur
+        if idx + 1 < len(chunks):
+            next_chunk = chunks[idx + 1]
+            next_start = float(next_chunk.get("start", target_end))
+            if next_start > start:
+                target_end = min(target_end, next_start)
+            else:
+                next_chunk["start"] = round(target_end, 3)
+        chunk["end"] = round(max(start + min_chunk_dur, target_end), 3)
+        interior_zero_chunks_fixed += 1
+
+    for idx, chunk in enumerate(chunks):
+        chunk["chunk_id"] = idx
 
     report = {
         "profile": profile,
@@ -519,6 +571,8 @@ def refine_payload(
         "words_changed": changes,
         "mean_abs_start_shift": round(total_shift / max(1, changes), 4),
         "median_word_duration_before": round(median_word_dur, 4),
+        "dropped_zero_chunks": dropped_zero_chunks,
+        "interior_zero_chunks_fixed": interior_zero_chunks_fixed,
     }
     _sync_top_level_words(refined)
     refined.setdefault("meta", {})
@@ -535,11 +589,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--use-lrc-anchors", dest="use_lrc_anchors", action="store_true", default=True)
     parser.add_argument("--no-lrc-anchors", dest="use_lrc_anchors", action="store_false")
     parser.add_argument("--lrc-anchor-window", type=float, default=0.18)
-    parser.add_argument("--lrc-anchor-weight", type=float, default=3.5)
-    parser.add_argument("--lrc-anchor-keep-weight", type=float, default=0.30)
+    parser.add_argument("--lrc-anchor-weight", type=float, default=4.5)
+    parser.add_argument("--lrc-anchor-keep-weight", type=float, default=0.20)
     parser.add_argument("--lrc-anchor-min-delta", type=float, default=0.04)
-    parser.add_argument("--lrc-anchor-span-words", type=int, default=1)
-    parser.add_argument("--lrc-anchor-max-ratio", type=float, default=0.15)
+    parser.add_argument("--lrc-anchor-span-words", type=int, default=4)
+    parser.add_argument("--lrc-anchor-max-ratio", type=float, default=0.35)
     parser.add_argument("--sr", type=int, default=22050)
     parser.add_argument("--hop-length", type=int, default=256)
     parser.add_argument("--early-thr", type=float, default=0.05)

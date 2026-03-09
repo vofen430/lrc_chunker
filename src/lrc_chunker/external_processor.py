@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import threading
@@ -263,10 +264,11 @@ def render_chunk_lrc(payload: dict) -> Tuple[str, List[str]]:
     last_ts = 0.0
     out_lines: List[str] = []
     for chunk in payload.get("chunks", []) or []:
-        text = normalize_ws(str(chunk.get("text") or ""))
+        words = chunk.get("words", []) or []
+        word_text = normalize_ws(" ".join(str(word.get("text") or "").strip() for word in words if str(word.get("text") or "").strip()))
+        text = word_text or normalize_ws(str(chunk.get("text") or ""))
         if not text:
             continue
-        words = chunk.get("words", []) or []
         first_line_id: Optional[int] = None
         for word in words:
             try:
@@ -310,7 +312,7 @@ def process_pair_to_lrc(pair: PairJob, *, options: Dict[str, object], work_dir: 
     profile = str(options.get("profile") or "slow_attack").strip() or "slow_attack"
     artifacts_dir = work_dir / "artifacts"
     align_config = AlignmentConfig(
-        model=str(options.get("model") or "small.en"),
+        model=str(options.get("model") or "medium.en"),
         language=language,
         vad_threshold=float(options.get("vad_threshold") or 0.35),
         denoiser=str(options.get("denoiser") or "auto"),
@@ -364,11 +366,11 @@ def process_pair_to_lrc(pair: PairJob, *, options: Dict[str, object], work_dir: 
         audio_vocals=find_payload_vocals_path(payload),
         use_lrc_anchors=bool(options.get("use_lrc_anchors", True)),
         lrc_anchor_window=float(options.get("lrc_anchor_window") or 0.18),
-        lrc_anchor_weight=float(options.get("lrc_anchor_weight") or 3.5),
-        lrc_anchor_keep_weight=float(options.get("lrc_anchor_keep_weight") or 0.30),
+        lrc_anchor_weight=float(options.get("lrc_anchor_weight") or 4.5),
+        lrc_anchor_keep_weight=float(options.get("lrc_anchor_keep_weight") or 0.20),
         lrc_anchor_min_delta=float(options.get("lrc_anchor_min_delta") or 0.04),
-        lrc_anchor_span_words=int(options.get("lrc_anchor_span_words") or 1),
-        lrc_anchor_max_ratio=float(options.get("lrc_anchor_max_ratio") or 0.15),
+        lrc_anchor_span_words=int(options.get("lrc_anchor_span_words") or 4),
+        lrc_anchor_max_ratio=float(options.get("lrc_anchor_max_ratio") or 0.35),
         sr=int(options.get("sr") or 22050),
         hop_length=int(options.get("hop_length") or 256),
         early_thr=float(options.get("early_thr") or 0.05),
@@ -718,25 +720,39 @@ def _spawn_worker(job_dir: Path, stdout_log: Path, stderr_log: Path) -> None:
     src_dir = Path(__file__).resolve().parents[1]
     existing_pythonpath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{src_dir}{os.pathsep}{existing_pythonpath}" if existing_pythonpath else str(src_dir)
-    cmd = [sys.executable, "-m", "lrc_chunker.external_processor", "run-worker", "--job-dir", str(job_dir)]
+    cmd = [sys.executable, "-m", "lrc_chunker.external_processor", "-A", "run-worker", "--job-dir", str(job_dir)]
     stdout_log.parent.mkdir(parents=True, exist_ok=True)
     stderr_log.parent.mkdir(parents=True, exist_ok=True)
-    with stdout_log.open("ab") as stdout_handle, stderr_log.open("ab") as stderr_handle:
-        kwargs = {
-            "stdout": stdout_handle,
-            "stderr": stderr_handle,
-            "stdin": subprocess.DEVNULL,
-            "cwd": str(job_dir),
-            "env": env,
-            "close_fds": True,
-        }
-        if os.name == "nt":
-            kwargs["creationflags"] = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-        else:
-            kwargs["start_new_session"] = True
-        proc = subprocess.Popen(cmd, **kwargs)
-        if proc.poll() is not None:
-            raise ExternalProcessorError("WORKER_SPAWN_FAILED", "Worker exited during launch.", exit_code=14)
+    if os.name == "nt":
+        with stdout_log.open("ab") as stdout_handle, stderr_log.open("ab") as stderr_handle:
+            kwargs = {
+                "stdout": stdout_handle,
+                "stderr": stderr_handle,
+                "stdin": subprocess.DEVNULL,
+                "cwd": str(job_dir),
+                "env": env,
+                "close_fds": True,
+                "creationflags": getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+            }
+            proc = subprocess.Popen(cmd, **kwargs)
+            if proc.poll() is not None:
+                raise ExternalProcessorError("WORKER_SPAWN_FAILED", "Worker exited during launch.", exit_code=14)
+        return
+
+    quoted_cmd = " ".join(shlex.quote(part) for part in cmd)
+    shell_cmd = f"nohup {quoted_cmd} >> {shlex.quote(str(stdout_log))} 2>> {shlex.quote(str(stderr_log))} </dev/null &"
+    proc = subprocess.Popen(
+        ["/bin/bash", "-lc", shell_cmd],
+        cwd=str(job_dir),
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        start_new_session=True,
+    )
+    if proc.poll() is not None:
+        raise ExternalProcessorError("WORKER_SPAWN_FAILED", "Worker exited during launch.", exit_code=14)
 
 
 def _write_launch_status(request: JobRequest) -> None:
@@ -878,7 +894,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_batch = subparsers.add_parser("batch-folder", help="Debug entry for batch processing a local folder.")
     p_batch.add_argument("--input-dir", required=True, type=str)
     p_batch.add_argument("--output-dir", required=True, type=str)
-    p_batch.add_argument("--model", default="small.en")
+    p_batch.add_argument("--model", default="medium.en")
     p_batch.add_argument("--language", default="en")
     p_batch.add_argument("--profile", default="slow_attack")
     p_batch.add_argument("--denoiser", default="auto")

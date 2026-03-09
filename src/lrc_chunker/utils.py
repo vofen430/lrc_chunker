@@ -90,6 +90,46 @@ def safe_stem(path: str) -> str:
     return stem or "artifact"
 
 
+_GENERIC_ARTIFACT_DIR_NAMES = {
+    "",
+    "tmp",
+    "temp",
+    "artifacts",
+    "artifact",
+    "output",
+    "outputs",
+    "result",
+    "results",
+    "preview",
+    "previews",
+    "visualization",
+    "m0",
+    "m1",
+    "home",
+    "dev",
+    "workspace",
+    "lrc_chunker",
+}
+
+
+def artifact_name_prefix(*, run_dir: str = "", audio_path: str = "", fallback: str = "artifact") -> str:
+    parts: List[str] = []
+    run_path = Path(run_dir).expanduser() if run_dir else None
+    if run_path is not None:
+        for candidate in [run_path.name, run_path.parent.name, run_path.parent.parent.name if run_path.parent != run_path else ""]:
+            normalized = safe_stem(candidate)
+            if normalized and normalized.lower() not in _GENERIC_ARTIFACT_DIR_NAMES:
+                parts.append(normalized)
+                break
+
+    audio_part = safe_stem(audio_path) if audio_path else ""
+    if audio_part:
+        if not any(audio_part == existing or audio_part in existing or existing in audio_part for existing in parts):
+            parts.append(audio_part)
+
+    return "_".join(parts) if parts else safe_stem(fallback)
+
+
 def first_existing_path(candidates: Iterable[object]) -> str:
     for candidate in candidates:
         if not candidate:

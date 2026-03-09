@@ -15,3 +15,8 @@ Miniconda3-*.sh
 build/
 dist/
 *.spec
+ae_jobs/*
+!ae_jobs/README.md
+!ae_jobs/templates/
+!ae_jobs/templates/**
+test/job_single/status.json

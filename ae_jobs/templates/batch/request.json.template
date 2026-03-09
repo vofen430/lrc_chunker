@@ -1,0 +1,23 @@
+{
+  "protocol_version": 1,
+  "job_id": "__JOB_ID__",
+  "created_utc": "__CREATED_UTC__",
+  "input": {
+    "mode": "batch_manifest",
+    "batch_manifest_path": "/home/dev/workspace/lrc_chunker/ae_jobs/__JOB_ID__/batch_pairs.json"
+  },
+  "output": {
+    "result_dir": "/home/dev/workspace/lrc_chunker/ae_jobs/__JOB_ID__/results"
+  },
+  "options": {
+    "model": "medium.en",
+    "language": "en",
+    "profile": "slow_attack",
+    "denoiser": "auto",
+    "use_lrc_anchors": true
+  },
+  "callback": {
+    "status_file": "/home/dev/workspace/lrc_chunker/ae_jobs/__JOB_ID__/status.json",
+    "cancel_flag": "/home/dev/workspace/lrc_chunker/ae_jobs/__JOB_ID__/cancel.flag"
+  }
+}

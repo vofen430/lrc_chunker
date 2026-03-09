@@ -19,6 +19,9 @@ class ChunkingConfig:
     max_words: int = 6
     max_dur: float = 3.2
     hard_max_chunk_dur: float = 6.0
+    confident_boundary_threshold: float = 0.98
+    confident_boundary_max_span: float = 0.20
+    use_confident_boundary_gate: bool = True
     rhythm_weight: float = 2.8
     hard_line_breaks: bool = True
     emphasize_long_words: bool = True
@@ -38,18 +41,26 @@ def _split_needed(current: List[WordTiming], nxt: WordTiming, config: ChunkingCo
     gap = max(0.0, nxt.start - prev.end)
     duration = max(0.0, nxt.end - current[0].start)
     proposed = _text([*current, nxt])
+
+    def confident_boundary() -> bool:
+        if not config.use_confident_boundary_gate:
+            return True
+        boundary_span = max(prev.end, nxt.end) - min(prev.start, nxt.start)
+        return (
+            min(float(prev.confidence), float(nxt.confidence)) >= float(config.confident_boundary_threshold)
+            and boundary_span <= float(config.confident_boundary_max_span)
+        )
+
     if config.hard_line_breaks and nxt.line_id != prev.line_id:
-        return True
+        return confident_boundary()
     if gap > config.max_gap:
-        return True
+        return confident_boundary()
     if len(current) + 1 > config.max_words:
         return True
-    if len(proposed) > config.max_chars:
-        return True
     if duration > config.max_dur:
-        return True
+        return confident_boundary()
     if PUNCT_BOUNDARY_RE.search(prev.text or "") and gap >= config.merge_gap:
-        return True
+        return confident_boundary()
     return False
 
 
@@ -144,7 +155,6 @@ def build_chunks(words: Sequence[WordTiming], config: ChunkingConfig) -> List[Ch
         if (
             gap <= config.merge_gap
             and len(merged_words) <= config.max_words
-            and len(merged_text) <= config.max_chars
             and merged_dur <= config.max_dur
         ):
             merged[-1] = Chunk(

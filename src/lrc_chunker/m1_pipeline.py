@@ -8,7 +8,7 @@ from typing import Dict, List, Sequence, Tuple
 import numpy as np
 
 from .motion_m1_demucs_benchmark import compose_quad_video_with_audio, render_single_preview_with_audio
-from .utils import clamp, find_payload_vocals_path, mean, percentile, read_json, safe_stem, write_json
+from .utils import artifact_name_prefix, clamp, find_payload_vocals_path, mean, percentile, read_json, safe_stem, write_json
 
 
 DEFAULTS = {
@@ -196,6 +196,7 @@ def run_benchmark(args) -> int:
     vocals_path = args.vocals_path or find_payload_vocals_path(m0_payload)
     run_dir = Path(args.run_dir).expanduser().resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
+    prefix = artifact_name_prefix(run_dir=str(run_dir), audio_path=str(Path(args.audio).expanduser().resolve()), fallback=str(m0_path))
 
     cfg = {
         "sr": float(args.sr),
@@ -211,8 +212,8 @@ def run_benchmark(args) -> int:
     }
 
     mix_payload, mix_report = _extract_rows(m0_payload, args.audio, "mix", cfg)
-    mix_json = run_dir / "features_audio_fast_mix.json"
-    mix_report_json = run_dir / "validation_report_m1_mix.json"
+    mix_json = run_dir / f"{prefix}_features_audio_fast_mix.json"
+    mix_report_json = run_dir / f"{prefix}_validation_report_m1_mix.json"
     write_json(mix_json, mix_payload)
     write_json(mix_report_json, mix_report)
     print(f"[m1] wrote {mix_json}")
@@ -224,9 +225,9 @@ def run_benchmark(args) -> int:
     mux_video = None
     if vocals_path:
         vocals_payload, vocals_report = _extract_rows(m0_payload, vocals_path, "demucs_vocals", cfg)
-        vocals_json = run_dir / "features_audio_fast_demucs_vocals.json"
-        vocals_report_json = run_dir / "validation_report_m1_demucs_vocals.json"
-        comparison_json = run_dir / "comparison_report_m1_demucs.json"
+        vocals_json = run_dir / f"{prefix}_features_audio_fast_demucs_vocals.json"
+        vocals_report_json = run_dir / f"{prefix}_validation_report_m1_demucs_vocals.json"
+        comparison_json = run_dir / f"{prefix}_comparison_report_m1_demucs.json"
         write_json(vocals_json, vocals_payload)
         write_json(vocals_report_json, vocals_report)
         write_json(
@@ -242,7 +243,7 @@ def run_benchmark(args) -> int:
         print(f"[m1] wrote {vocals_report_json}")
         print(f"[m1] wrote {comparison_json}")
 
-        mux_video = run_dir / "m1_demucs_parameter_preview.mp4"
+        mux_video = run_dir / f"{prefix}_m1_demucs_parameter_preview.mp4"
         render_single_preview_with_audio(
             m0_path=m0_path,
             m1_mix_path=mix_json,

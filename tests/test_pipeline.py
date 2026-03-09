@@ -12,10 +12,29 @@ from lrc_chunker.alignment import AlignmentConfig, _assign_aligned_words_to_line
 from lrc_chunker.chunking import ChunkingConfig, build_chunks
 from lrc_chunker.external_processor import _collect_folder_pairs, build_parser as build_external_parser, format_lrc_timestamp, load_job_request, main as external_main, render_chunk_lrc, run_job_dir
 from lrc_chunker.lrc import parse_lrc
-from lrc_chunker.models import LyricLine
+from lrc_chunker.models import LyricLine, WordTiming
 from lrc_chunker.motion_m0_extract import extract_m0_features
-from lrc_chunker.utils import find_payload_vocals_path
+from lrc_chunker.utils import artifact_name_prefix, find_payload_vocals_path
 from lrc_chunker.word_refine import PROFILES, _apply_breath_guard, build_parser as build_refine_parser, refine_payload
+
+
+def build_word(
+    text: str,
+    start: float,
+    end: float,
+    *,
+    line_id: int | None = None,
+    confidence: float = 1.0,
+    index: int = 0,
+) -> WordTiming:
+    return WordTiming(
+        text=text,
+        start=start,
+        end=end,
+        line_id=line_id,
+        confidence=confidence,
+        index=index,
+    )
 
 
 def test_parse_lrc_removes_head_metadata_and_prefers_primary_language(tmp_path: Path) -> None:
@@ -72,7 +91,7 @@ def test_fallback_pipeline_produces_non_overlapping_chunks(tmp_path: Path) -> No
 
     lines = parse_lrc(str(lrc_path))
     words, _, backend_used = fallback_align_from_lrc(lines, audio_path="demo.wav")
-    chunks = build_chunks(words, ChunkingConfig())
+    chunks = build_chunks(words, ChunkingConfig(merge_gap=0.005))
     payload = build_alignment_payload(
         audio_path="demo.wav",
         lrc_path=str(lrc_path),
@@ -253,10 +272,32 @@ def test_refine_cli_defaults_to_small_flow_profile_and_lrc_anchors() -> None:
 
     assert args.profile == "slow_attack"
     assert args.use_lrc_anchors is True
+    assert args.lrc_anchor_weight == 4.5
+    assert args.lrc_anchor_keep_weight == 0.20
+    assert args.lrc_anchor_span_words == 4
+    assert args.lrc_anchor_max_ratio == 0.35
 
 
 def test_format_lrc_timestamp_uses_millisecond_precision() -> None:
     assert format_lrc_timestamp(62.345) == "[01:02.345]"
+
+
+def test_artifact_name_prefix_uses_job_or_run_dir_context() -> None:
+    prefix = artifact_name_prefix(
+        run_dir="/tmp/ae_acoldplay_check2/visualization/m1",
+        audio_path="/home/dev/workspace/lrc_chunker/test/A COLD PLAY - The Kid LAROI.wav",
+    )
+
+    assert prefix == "ae_acoldplay_check2_A_COLD_PLAY_-_The_Kid_LAROI"
+
+
+def test_artifact_name_prefix_avoids_duplicate_audio_suffix_when_run_dir_already_identifies_source() -> None:
+    prefix = artifact_name_prefix(
+        run_dir="/home/dev/workspace/lrc_chunker/artifacts/m1/Memories_small_en",
+        audio_path="/home/dev/workspace/lrc_chunker/test/Memories.wav",
+    )
+
+    assert prefix == "Memories_small_en"
 
 
 def test_render_chunk_lrc_keeps_ground_truth_on_first_split_chunk() -> None:
@@ -360,6 +401,183 @@ def test_load_job_request_reads_batch_manifest_and_preserves_order(tmp_path: Pat
     assert request.mode == "batch_manifest"
     assert [pair.row_index for pair in request.pairs] == [2, 1]
     assert Path(request.pairs[0].result_lrc_path).name.startswith("0002_")
+
+
+def test_render_chunk_lrc_prefers_word_text_over_chunk_text() -> None:
+    payload = {
+        "lines": [
+            {"line_id": 0, "timestamp": 1.0, "text": "hello world"},
+        ],
+        "chunks": [
+            {
+                "chunk_id": 0,
+                "start": 1.0,
+                "end": 1.5,
+                "text": "model drifted text",
+                "line_ids": [0],
+                "words": [
+                    {"text": "hello", "start": 1.0, "end": 1.2, "line_id": 0},
+                    {"text": "world", "start": 1.2, "end": 1.5, "line_id": 0},
+                ],
+            }
+        ],
+    }
+
+    text, warnings = render_chunk_lrc(payload)
+
+    assert warnings == []
+    assert text.splitlines() == ["[00:01.000]hello world"]
+
+
+def test_refine_payload_enforces_positive_chunk_duration() -> None:
+    payload = {
+        "meta": {},
+        "chunks": [
+            {
+                "chunk_id": 0,
+                "start": 1.0,
+                "end": 1.0,
+                "text": "hello",
+                "words": [
+                    {"text": "hello", "start": 1.0, "end": 1.0},
+                ],
+            }
+        ],
+        "words": [
+            {"text": "hello", "start": 1.0, "end": 1.0},
+        ],
+    }
+
+    refined, report = refine_payload(payload, profile="slow_attack")
+
+    assert refined["chunks"] == []
+    assert report["dropped_zero_chunks"] == 1
+
+
+def test_refine_payload_drops_leading_and_trailing_zero_duration_chunks() -> None:
+    payload = {
+        "meta": {},
+        "chunks": [
+            {
+                "chunk_id": 0,
+                "start": 0.0,
+                "end": 0.0,
+                "text": "meta",
+                "words": [{"text": "meta", "start": 0.0, "end": 0.0}],
+            },
+            {
+                "chunk_id": 1,
+                "start": 1.0,
+                "end": 1.4,
+                "text": "hello",
+                "words": [{"text": "hello", "start": 1.0, "end": 1.4}],
+            },
+            {
+                "chunk_id": 2,
+                "start": 2.0,
+                "end": 2.0,
+                "text": "tail",
+                "words": [{"text": "tail", "start": 2.0, "end": 2.0}],
+            },
+        ],
+        "words": [
+            {"text": "meta", "start": 0.0, "end": 0.0},
+            {"text": "hello", "start": 1.0, "end": 1.4},
+            {"text": "tail", "start": 2.0, "end": 2.0},
+        ],
+    }
+
+    refined, report = refine_payload(payload, profile="slow_attack")
+
+    assert len(refined["chunks"]) == 1
+    assert refined["chunks"][0]["text"] == "hello"
+    assert report["dropped_zero_chunks"] == 2
+
+
+def test_refine_payload_keeps_interior_zero_duration_chunk_but_makes_it_positive() -> None:
+    payload = {
+        "meta": {},
+        "chunks": [
+            {
+                "chunk_id": 0,
+                "start": 1.0,
+                "end": 1.4,
+                "text": "hello",
+                "words": [{"text": "hello", "start": 1.0, "end": 1.4}],
+            },
+            {
+                "chunk_id": 1,
+                "start": 1.6,
+                "end": 1.6,
+                "text": "bridge",
+                "words": [{"text": "bridge", "start": 1.6, "end": 1.6}],
+            },
+            {
+                "chunk_id": 2,
+                "start": 2.0,
+                "end": 2.5,
+                "text": "world",
+                "words": [{"text": "world", "start": 2.0, "end": 2.5}],
+            },
+        ],
+        "words": [
+            {"text": "hello", "start": 1.0, "end": 1.4},
+            {"text": "bridge", "start": 1.6, "end": 1.6},
+            {"text": "world", "start": 2.0, "end": 2.5},
+        ],
+    }
+
+    refined, report = refine_payload(payload, profile="slow_attack")
+
+    assert len(refined["chunks"]) == 3
+    assert refined["chunks"][1]["end"] > refined["chunks"][1]["start"]
+    assert report["interior_zero_chunks_fixed"] == 1
+
+
+def test_chunking_splits_high_confidence_short_span_line_break() -> None:
+    words = [
+        build_word("hello", 0.00, 0.07, line_id=0, confidence=0.995, index=0),
+        build_word("world", 0.08, 0.15, line_id=1, confidence=0.992, index=1),
+    ]
+
+    chunks = build_chunks(words, ChunkingConfig(merge_gap=0.005))
+
+    assert len(chunks) == 2
+    assert [chunk.text for chunk in chunks] == ["hello", "world"]
+
+
+def test_chunking_keeps_low_confidence_line_break_together() -> None:
+    words = [
+        build_word("hello", 0.00, 0.07, line_id=0, confidence=0.97, index=0),
+        build_word("world", 0.08, 0.15, line_id=1, confidence=0.96, index=1),
+    ]
+
+    chunks = build_chunks(words, ChunkingConfig())
+
+    assert len(chunks) == 1
+    assert chunks[0].text == "hello world"
+
+
+def test_chunking_no_longer_splits_on_character_limit_alone() -> None:
+    words = [
+        build_word("supercalifragilisticexpialidocious", 0.00, 0.40, line_id=0, confidence=0.999, index=0),
+        build_word("pneumonoultramicroscopicsilicovolcanoconiosis", 0.44, 0.86, line_id=0, confidence=0.999, index=1),
+    ]
+
+    chunks = build_chunks(
+        words,
+        ChunkingConfig(
+            max_chars=8,
+            max_words=6,
+            max_gap=1.0,
+            max_dur=5.0,
+            merge_gap=0.5,
+        ),
+    )
+
+    assert len(chunks) == 1
+    assert "supercalifragilisticexpialidocious" in chunks[0].text
+    assert "pneumonoultramicroscopicsilicovolcanoconiosis" in chunks[0].text
 
 
 def test_collect_folder_pairs_matches_same_basename_and_prefers_wav(tmp_path: Path) -> None:

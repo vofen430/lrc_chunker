@@ -222,7 +222,7 @@ Windows 构建脚本：
   },
   "options": {
     "mode": "default",
-    "model": "small.en",
+    "model": "medium.en",
     "language": "en",
     "profile": "slow_attack",
     "denoiser": "auto",
@@ -264,7 +264,7 @@ Windows 构建脚本：
   },
   "options": {
     "mode": "default",
-    "model": "small.en",
+    "model": "medium.en",
     "language": "en",
     "profile": "slow_attack",
     "denoiser": "auto",

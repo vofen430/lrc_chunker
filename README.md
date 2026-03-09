@@ -73,14 +73,14 @@ python motion_m1_demucs_benchmark.py "artifacts/m0/features_text_timing_chunking
 - 产物：`artifacts/denoised/Memories_-_Conan_Gray_demucs_vocals.wav`
 - 产物：`artifacts/refinement/chunking_Memories_-_Conan_Gray_small.en_wordref_slow_attack.json`
 - 产物：`artifacts/m0/features_text_timing_chunking_Memories_-_Conan_Gray_small.en_wordref_slow_attack.json`
-- 产物：`artifacts/m1/Memories_small_en/m1_demucs_parameter_preview.mp4`
+- 产物：`artifacts/m1/Memories_small_en/Memories_small_en_m1_demucs_parameter_preview.mp4`
 
 ## 输出目录
 
 - `artifacts/alignment/`: `chunking_*.json`
 - `artifacts/refinement/`: `*_wordref_*.json` 与修正报告
 - `artifacts/m0/`: `features_text_timing_*.json` 与 M0 校验报告
-- `artifacts/m1/`: mix / vocals 特征、M1 报告、预览视频
+- `artifacts/m1/`: 带运行目录前缀的 mix / vocals 特征、M1 报告、预览视频，避免不同 job 同名覆盖
 - `artifacts/preview/`: 2x2 对比视频
 
 ## 验收对齐
@@ -129,4 +129,10 @@ cd /home/dev/workspace/lrc_chunker
 - 产物：`lrc-processor-onefile-windows-x86_64.exe`
 - 打 `v*` tag 时，会自动把该 `.exe` 附到 GitHub Release
 - 手动触发时，也可填写 `release_tag`，例如 `v0.1.1`，工作流会自动创建/更新对应 release 并附上 `.exe`
+
+如果 AE 插件改为桥接 WSL 内已验证的处理环境，而不是调用 Windows 本地打包结果，请看：
+
+- [AE_WSL_BRIDGE_INTEGRATION.md](/home/dev/workspace/lrc_chunker/docs/AE_WSL_BRIDGE_INTEGRATION.md)
+- [AE_WSL_BRIDGE_HANDOFF.md](/home/dev/workspace/lrc_chunker/docs/AE_WSL_BRIDGE_HANDOFF.md)
+- [AE_WSL_BRIDGE_SMOKE_TEST.md](/home/dev/workspace/lrc_chunker/docs/AE_WSL_BRIDGE_SMOKE_TEST.md)
 

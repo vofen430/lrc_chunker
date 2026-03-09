@@ -1,0 +1,35 @@
+{
+  "protocol_version": 1,
+  "manifest_type": "ae_lrc_batch_pairs",
+  "created_utc": "__CREATED_UTC__",
+  "source": {
+    "host": "after-effects",
+    "panel": "LRC_Panel_Modular"
+  },
+  "batch": {
+    "order_mode": "ui_order",
+    "row_count": 2,
+    "ready_count": 2,
+    "skipped_count": 0
+  },
+  "items": [
+    {
+      "row_index": 1,
+      "row_id": 101,
+      "pair_state": "ready",
+      "title": "Song A",
+      "artist": "Artist A",
+      "lrc_path": "/home/dev/workspace/lrc_chunker/ae_jobs/__JOB_ID__/input/song_a.lrc",
+      "audio_path": "/home/dev/workspace/lrc_chunker/ae_jobs/__JOB_ID__/input/song_a.wav"
+    },
+    {
+      "row_index": 2,
+      "row_id": 102,
+      "pair_state": "ready",
+      "title": "Song B",
+      "artist": "Artist B",
+      "lrc_path": "/home/dev/workspace/lrc_chunker/ae_jobs/__JOB_ID__/input/song_b.lrc",
+      "audio_path": "/home/dev/workspace/lrc_chunker/ae_jobs/__JOB_ID__/input/song_b.wav"
+    }
+  ]
+}

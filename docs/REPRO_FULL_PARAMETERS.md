@@ -487,6 +487,7 @@ M0 outputs:
 
 M1 outputs:
 
+- `prefix` defaults to a path-derived identifier from `run_dir`, and will append the audio stem when needed for uniqueness
 - `features_audio_fast_mix*.json`
 - `features_audio_fast_demucs_vocals*.json`
 - `validation_report_m1_mix*.json`
