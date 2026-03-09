@@ -21,10 +21,13 @@ def extract_m0_features(payload: dict, min_repaired_word_dur: float = 0.04) -> t
         raw_durs: List[float] = []
         eff_durs: List[float] = []
         for word_idx, word in enumerate(words):
-            start = float(word.get("start", 0.0))
-            end = float(word.get("end", start))
-            raw_dur = max(0.0, end - start)
-            eff_dur = max(min_repaired_word_dur, raw_dur)
+            raw_start = float(word.get("start", 0.0))
+            raw_end = float(word.get("end", raw_start))
+            start = float(word.get("simulated_start", raw_start))
+            end = float(word.get("simulated_end", word.get("end", start)))
+            raw_dur = max(0.0, raw_end - raw_start)
+            simulated_dur = max(0.0, end - start)
+            eff_dur = max(min_repaired_word_dur, simulated_dur if simulated_dur > 0 else raw_dur)
             raw_durs.append(raw_dur)
             eff_durs.append(eff_dur)
             total_words += 1
@@ -36,15 +39,28 @@ def extract_m0_features(payload: dict, min_repaired_word_dur: float = 0.04) -> t
                     "text": str(word.get("text") or "").strip(),
                     "start": start,
                     "end": end,
+                    "audio_start": raw_start,
+                    "audio_end": raw_end,
+                    "midpoint": float(word.get("simulated_midpoint", 0.5 * (start + end))),
                     "raw_duration": raw_dur,
+                    "simulated_duration": float(word.get("simulated_duration", simulated_dur)),
                     "effective_duration": eff_dur,
+                    "timing_source": str(word.get("timing_source", "alignment")),
+                    "timing_confidence": float(word.get("timing_confidence", word.get("confidence", 1.0) or 1.0)),
+                    "is_simulated": "simulated_start" in word or str(word.get("timing_source", "")) == "simulated_from_chunk_context",
                 }
             )
 
-        start = float(chunk.get("start", 0.0))
-        end = float(chunk.get("end", start))
+        audio_start = float(chunk.get("start", 0.0))
+        audio_end = float(chunk.get("end", audio_start))
+        start = float(chunk.get("display_start", audio_start))
+        end = float(chunk.get("display_end", max(start, audio_end)))
         duration = max(0.0, end - start)
-        next_start = float(chunks[idx + 1].get("start", end)) if idx + 1 < len(chunks) else end
+        next_start = (
+            float(chunks[idx + 1].get("display_start", chunks[idx + 1].get("start", end)))
+            if idx + 1 < len(chunks)
+            else end
+        )
         gap_to_next = next_start - end
         if gap_to_next < 0:
             negative_gaps += 1
@@ -57,6 +73,10 @@ def extract_m0_features(payload: dict, min_repaired_word_dur: float = 0.04) -> t
                 "chunk_id": int(chunk.get("chunk_id", idx)),
                 "start": start,
                 "end": end,
+                "audio_start": audio_start,
+                "audio_end": audio_end,
+                "display_start": start,
+                "display_end": end,
                 "text": str(chunk.get("text") or "").strip(),
                 "chunk_duration": duration,
                 "word_count": len(words),

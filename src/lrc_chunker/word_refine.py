@@ -3,10 +3,11 @@
 import argparse
 from copy import deepcopy
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
 
+from .display_timing import apply_chunk_display_timing
 from .utils import FUNCTION_WORDS, find_payload_vocals_path, median, percentile, read_json, safe_stem, tokenize, write_json
 
 
@@ -252,6 +253,172 @@ def _is_function_word(text: str) -> bool:
     return bool(toks) and all(tok in FUNCTION_WORDS for tok in toks)
 
 
+def _word_char_weight(text: str) -> float:
+    text = str(text or "").strip()
+    if not text:
+        return 1.0
+    tokens = tokenize(text)
+    if not tokens:
+        return 1.0
+    weight = 0.0
+    for token in tokens:
+        if any("\u4e00" <= ch <= "\u9fff" for ch in token):
+            weight += sum(1.0 for ch in token if "\u4e00" <= ch <= "\u9fff")
+            continue
+        alnum = sum(1 for ch in token if ch.isalnum())
+        if alnum > 0:
+            weight += float(alnum)
+        else:
+            weight += 0.5
+    return max(1.0, weight)
+
+
+def _chunk_display_bounds(chunk: dict) -> Tuple[float, float]:
+    start = float(chunk.get("display_start", chunk.get("start", 0.0)))
+    end = float(chunk.get("display_end", chunk.get("end", start)))
+    return start, max(start, end)
+
+
+def _clear_simulated_timing(word: dict) -> None:
+    for key in ("simulated_start", "simulated_end", "simulated_midpoint", "simulated_duration"):
+        word.pop(key, None)
+
+
+def _repair_zero_duration_words_in_chunk(
+    chunk: dict,
+    *,
+    zero_word_epsilon: float,
+    min_word_dur: float,
+    global_median_word_dur: float,
+    max_word_dur: float,
+    function_word_ratio: float,
+    inter_word_safety_gap: float,
+) -> tuple[int, int, int]:
+    words = chunk.get("words", []) or []
+    if not words:
+        return 0, 0, 0
+
+    for word in words:
+        raw_start = float(word.get("start", 0.0))
+        raw_end = float(word.get("end", raw_start))
+        raw_duration = max(0.0, raw_end - raw_start)
+        flagged_for_simulation = bool(word.get("_needs_simulated_word_timing"))
+        if raw_duration > zero_word_epsilon and not flagged_for_simulation:
+            _clear_simulated_timing(word)
+            word["timing_source"] = "alignment"
+            word["timing_confidence"] = float(word.get("confidence", 1.0) or 1.0)
+
+    valid_indices = [
+        idx
+        for idx, word in enumerate(words)
+        if max(0.0, float(word.get("end", 0.0)) - float(word.get("start", 0.0))) > zero_word_epsilon
+        and not bool(word.get("_needs_simulated_word_timing"))
+    ]
+    valid_durations = [
+        max(0.0, float(words[idx].get("end", 0.0)) - float(words[idx].get("start", 0.0)))
+        for idx in valid_indices
+    ]
+    valid_char_weights = [_word_char_weight(words[idx].get("text", "")) for idx in valid_indices]
+    chunk_median_word_dur = max(min_word_dur, median(valid_durations) or global_median_word_dur or min_word_dur)
+    char_rate = (
+        sum(valid_durations) / max(1.0, sum(valid_char_weights))
+        if valid_durations and sum(valid_char_weights) > 0
+        else 0.0
+    )
+    duration_ceiling = max(min_word_dur, min(max_word_dur, 2.5 * chunk_median_word_dur))
+    display_start, display_end = _chunk_display_bounds(chunk)
+
+    zero_indices = [
+        idx
+        for idx, word in enumerate(words)
+        if bool(word.get("_needs_simulated_word_timing"))
+        or max(0.0, float(word.get("end", 0.0)) - float(word.get("start", 0.0))) <= zero_word_epsilon
+    ]
+    if not zero_indices:
+        return 0, 0, 0
+
+    groups: List[Tuple[int, int]] = []
+    group_start = zero_indices[0]
+    prev_idx = zero_indices[0]
+    for idx in zero_indices[1:]:
+        if idx == prev_idx + 1:
+            prev_idx = idx
+            continue
+        groups.append((group_start, prev_idx))
+        group_start = idx
+        prev_idx = idx
+    groups.append((group_start, prev_idx))
+
+    repaired_words = 0
+    repaired_groups = 0
+    compressed_words = 0
+    for lo, hi in groups:
+        repaired_groups += 1
+        left_idx = lo - 1 if lo - 1 >= 0 else None
+        right_idx = hi + 1 if hi + 1 < len(words) else None
+
+        left_edge = display_start
+        if left_idx is not None:
+            left_edge = max(left_edge, float(words[left_idx].get("end", words[left_idx].get("start", display_start))))
+        right_edge = display_end
+        if right_idx is not None:
+            right_edge = min(right_edge, float(words[right_idx].get("start", display_end)))
+        if right_edge < left_edge:
+            right_edge = left_edge
+
+        group_words = words[lo : hi + 1]
+        estimates: List[float] = []
+        for word in group_words:
+            char_weight = _word_char_weight(word.get("text", ""))
+            estimated = char_rate * char_weight if char_rate > 0 else chunk_median_word_dur
+            if _is_function_word(str(word.get("text") or "")):
+                estimated = min(estimated, chunk_median_word_dur * function_word_ratio)
+            estimated = max(min_word_dur, min(duration_ceiling, estimated))
+            estimates.append(float(estimated))
+
+        total_gap_budget = inter_word_safety_gap * max(0, len(group_words) - 1)
+        available_duration = max(0.0, right_edge - left_edge - total_gap_budget)
+        total_estimated = sum(estimates)
+        if total_estimated <= 0:
+            estimates = [min_word_dur for _ in group_words]
+            total_estimated = sum(estimates)
+
+        scale = 1.0
+        if available_duration > 0 and total_estimated > available_duration:
+            scale = available_duration / total_estimated
+            compressed_words += len(group_words)
+
+        fitted_durations = [max(1e-3, est * scale) for est in estimates]
+        fitted_total = sum(fitted_durations)
+        usable_duration = max(0.0, right_edge - left_edge - total_gap_budget)
+        lead_slack = max(0.0, usable_duration - fitted_total) * 0.5
+        cursor = left_edge + lead_slack
+        if available_duration <= 0.0:
+            cursor = left_edge
+
+        for idx, word in enumerate(group_words):
+            sim_start = cursor
+            sim_end = sim_start + fitted_durations[idx]
+            if right_idx is not None and idx == len(group_words) - 1:
+                sim_end = min(sim_end, right_edge)
+            sim_end = max(sim_start + 1e-3, sim_end)
+            sim_mid = 0.5 * (sim_start + sim_end)
+            word["simulated_start"] = round(sim_start, 3)
+            word["simulated_end"] = round(sim_end, 3)
+            word["simulated_midpoint"] = round(sim_mid, 3)
+            word["simulated_duration"] = round(max(1e-3, sim_end - sim_start), 3)
+            word["timing_source"] = "simulated_from_chunk_context"
+            word["timing_confidence"] = 0.35
+            word.pop("_needs_simulated_word_timing", None)
+            repaired_words += 1
+            cursor = sim_end + inter_word_safety_gap
+
+    for word in words:
+        word.pop("_needs_simulated_word_timing", None)
+
+    return repaired_words, repaired_groups, compressed_words
+
+
 def _find_voiced_start(
     frame_times: np.ndarray,
     rms: np.ndarray,
@@ -396,6 +563,9 @@ def refine_payload(
     total_shift = 0.0
     breath_guard_moves = 0
     lrc_anchor_moves = 0
+    repaired_zero_words = 0
+    repaired_zero_word_groups = 0
+    compressed_simulated_words = 0
     durations: List[float] = [max(0.0, float(w.get("end", 0.0)) - float(w.get("start", 0.0))) for w in _iter_words(payload)]
     median_word_dur = max(params["min_word_dur"], median(durations) or params["min_word_dur"])
     line_timestamps = _line_timestamp_map(payload) if use_lrc_anchors else {}
@@ -407,6 +577,7 @@ def refine_payload(
         for idx, word in enumerate(words):
             orig_start = float(word.get("start", 0.0))
             orig_end = float(word.get("end", orig_start))
+            word["_needs_simulated_word_timing"] = (orig_end - orig_start) <= 0.01
             prev_anchor = chunk_start if idx == 0 else prev_end
             cands = _nearest_candidates(onsets, orig_start, params["start_back_max"], params["start_shift_max"])
             best_start = orig_start
@@ -551,6 +722,22 @@ def refine_payload(
     for idx, chunk in enumerate(chunks):
         chunk["chunk_id"] = idx
 
+    apply_chunk_display_timing(refined)
+
+    for chunk in refined.get("chunks", []):
+        fixed_words, fixed_groups, compressed_words = _repair_zero_duration_words_in_chunk(
+            chunk,
+            zero_word_epsilon=0.01,
+            min_word_dur=float(params["min_word_dur"]),
+            global_median_word_dur=median_word_dur,
+            max_word_dur=0.42,
+            function_word_ratio=0.90,
+            inter_word_safety_gap=0.005,
+        )
+        repaired_zero_words += fixed_words
+        repaired_zero_word_groups += fixed_groups
+        compressed_simulated_words += compressed_words
+
     report = {
         "profile": profile,
         "params": params,
@@ -573,6 +760,9 @@ def refine_payload(
         "median_word_duration_before": round(median_word_dur, 4),
         "dropped_zero_chunks": dropped_zero_chunks,
         "interior_zero_chunks_fixed": interior_zero_chunks_fixed,
+        "simulated_zero_words": repaired_zero_words,
+        "simulated_zero_word_groups": repaired_zero_word_groups,
+        "compressed_simulated_words": compressed_simulated_words,
     }
     _sync_top_level_words(refined)
     refined.setdefault("meta", {})

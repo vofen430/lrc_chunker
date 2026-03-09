@@ -8,10 +8,11 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from lrc_chunker.alignment import AlignmentConfig, _assign_aligned_words_to_lines, build_alignment_payload, fallback_align_from_lrc
+from lrc_chunker.alignment import AlignmentConfig, ForcedAlignmentWord, _assign_aligned_words_to_lines, _build_alignment_windows, _flatten_qwen_alignment, build_alignment_payload, fallback_align_from_lrc
 from lrc_chunker.chunking import ChunkingConfig, build_chunks
+from lrc_chunker.display_timing import apply_chunk_display_timing
 from lrc_chunker.external_processor import _collect_folder_pairs, build_parser as build_external_parser, format_lrc_timestamp, load_job_request, main as external_main, render_chunk_lrc, run_job_dir
-from lrc_chunker.lrc import parse_lrc
+from lrc_chunker.lrc import LrcParseConfig, parse_lrc
 from lrc_chunker.models import LyricLine, WordTiming
 from lrc_chunker.motion_m0_extract import extract_m0_features
 from lrc_chunker.utils import artifact_name_prefix, find_payload_vocals_path
@@ -53,7 +54,7 @@ def test_parse_lrc_removes_head_metadata_and_prefers_primary_language(tmp_path: 
         encoding="utf-8",
     )
 
-    rows = parse_lrc(str(lrc_path))
+    rows = parse_lrc(str(lrc_path), LrcParseConfig(use_metadata_embedding=False))
 
     assert [row.text for row in rows] == [
         "Hello from the other side",
@@ -61,19 +62,127 @@ def test_parse_lrc_removes_head_metadata_and_prefers_primary_language(tmp_path: 
     ]
 
 
+def test_parse_lrc_keeps_zero_second_lyric_when_metadata_shares_timestamp(tmp_path: Path) -> None:
+    lrc_path = tmp_path / "sample_zero.lrc"
+    lrc_path.write_text(
+        "\n".join(
+            [
+                "[00:00.000]Cry cry cry baby",
+                "[00:00.000][by:虹烧虾的红烧鱼]",
+                "[00:00.000]作曲 : Bert Berns/Chris Martin",
+                "[00:06.636]Cry cry cry",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    rows = parse_lrc(str(lrc_path), LrcParseConfig(use_metadata_embedding=False))
+
+    assert rows[0].text == "Cry cry cry baby"
+    assert any("作曲" in alt for alt in rows[0].alternatives)
+    assert any("by:" in alt.lower() for alt in rows[0].alternatives)
+
+
+def test_parse_lrc_removes_tail_metadata_only_in_edge_window(tmp_path: Path) -> None:
+    lrc_path = tmp_path / "sample_tail.lrc"
+    lrc_path.write_text(
+        "\n".join(
+            [
+                "[00:00.000]Hello world",
+                "[00:10.000]Stay with me",
+                "[03:30.000]作词 : Someone",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    rows = parse_lrc(str(lrc_path), LrcParseConfig(use_metadata_embedding=False))
+
+    assert [row.text for row in rows] == ["Hello world", "Stay with me"]
+
+
 def test_assign_aligned_words_to_lines_uses_lrc_tokens_for_word_text() -> None:
     lines = [
         LyricLine(line_id=0, timestamp=0.0, text="don't go"),
     ]
     aligned_words = [
-        {"text": "dont", "start": 0.10, "end": 0.40, "probability": 0.9},
-        {"text": "gooo", "start": 0.45, "end": 0.80, "probability": 0.8},
+        ForcedAlignmentWord(text="dont", start=0.10, end=0.40, confidence=0.9, source="stable_ts"),
+        ForcedAlignmentWord(text="gooo", start=0.45, end=0.80, confidence=0.8, source="stable_ts"),
     ]
 
     words, records = _assign_aligned_words_to_lines(lines, aligned_words)
 
     assert [word.text for word in words] == ["don't", "go"]
     assert records[0]["word_count"] == 2
+
+
+def test_flatten_qwen_alignment_accepts_nested_list_results() -> None:
+    result = [
+        [
+            {"text": "Baby", "start_time": 0.10, "end_time": 0.48},
+            {"text": "Chop", "start_time": 0.50, "end_time": 0.92},
+        ]
+    ]
+
+    flat = _flatten_qwen_alignment(result)
+
+    assert [item.text for item in flat] == ["Baby", "Chop"]
+    assert flat[0].source == "qwen_forced_aligner"
+
+
+def test_flatten_qwen_alignment_accepts_result_objects_with_items() -> None:
+    class DummyItem:
+        def __init__(self, text: str, start_time: float, end_time: float) -> None:
+            self.text = text
+            self.start_time = start_time
+            self.end_time = end_time
+
+    class DummyResult:
+        def __init__(self, items) -> None:
+            self.items = items
+
+    result = [
+        DummyResult(
+            [
+                DummyItem("Cry", 0.12, 0.41),
+                DummyItem("Cry", 0.45, 0.72),
+            ]
+        )
+    ]
+
+    flat = _flatten_qwen_alignment(result)
+
+    assert [item.text for item in flat] == ["Cry", "Cry"]
+    assert flat[0].start == 0.12
+    assert flat[0].source == "qwen_forced_aligner"
+
+
+def test_build_alignment_windows_splits_long_sequences() -> None:
+    lines = [
+        LyricLine(line_id=0, timestamp=0.0, text="one"),
+        LyricLine(line_id=1, timestamp=8.0, text="two"),
+        LyricLine(line_id=2, timestamp=27.0, text="three"),
+        LyricLine(line_id=3, timestamp=36.0, text="four"),
+        LyricLine(line_id=4, timestamp=61.0, text="five"),
+    ]
+
+    windows = _build_alignment_windows(
+        lines,
+        audio_duration=120.0,
+        config=AlignmentConfig(
+            alignment_backend="qwen_forced_aligner",
+            align_window_target_seconds=30.0,
+            align_window_max_seconds=170.0,
+            align_window_max_lines=99,
+            align_window_pre_roll=1.0,
+            align_window_post_roll=1.0,
+        ),
+    )
+
+    assert len(windows) == 3
+    assert [line.line_id for line in windows[0].lines] == [0, 1]
+    assert [line.line_id for line in windows[1].lines] == [2, 3]
+    assert [line.line_id for line in windows[2].lines] == [4]
 
 
 def test_fallback_pipeline_produces_non_overlapping_chunks(tmp_path: Path) -> None:
@@ -89,7 +198,7 @@ def test_fallback_pipeline_produces_non_overlapping_chunks(tmp_path: Path) -> No
         encoding="utf-8",
     )
 
-    lines = parse_lrc(str(lrc_path))
+    lines = parse_lrc(str(lrc_path), LrcParseConfig(use_metadata_embedding=False))
     words, _, backend_used = fallback_align_from_lrc(lines, audio_path="demo.wav")
     chunks = build_chunks(words, ChunkingConfig(merge_gap=0.005))
     payload = build_alignment_payload(
@@ -108,6 +217,141 @@ def test_fallback_pipeline_produces_non_overlapping_chunks(tmp_path: Path) -> No
     assert features["chunks"]
     assert report["no_negative_chunk_gaps"] is True
     assert report["max_visible_chunks_at_once"] == 1
+
+
+def test_display_timing_uses_lrc_interval_for_single_chunk_line() -> None:
+    payload = {
+        "meta": {},
+        "lines": [
+            {"line_id": 0, "timestamp": 6.636, "text": "Cry cry cry"},
+            {"line_id": 1, "timestamp": 15.017, "text": "In a book about the world"},
+        ],
+        "chunks": [
+            {
+                "chunk_id": 0,
+                "start": 15.68,
+                "end": 15.68,
+                "text": "Cry cry cry",
+                "line_ids": [0],
+                "words": [
+                    {"text": "Cry", "start": 15.68, "end": 15.68, "line_id": 0},
+                    {"text": "cry", "start": 15.68, "end": 15.68, "line_id": 0},
+                    {"text": "cry", "start": 15.68, "end": 15.68, "line_id": 0},
+                ],
+            }
+        ],
+    }
+
+    apply_chunk_display_timing(payload)
+
+    assert payload["chunks"][0]["display_start"] == 6.636
+    assert payload["chunks"][0]["display_end"] == 15.017
+
+
+def test_display_timing_splits_line_budget_by_chunk_duration_weights() -> None:
+    payload = {
+        "meta": {},
+        "lines": [
+            {"line_id": 0, "timestamp": 0.0, "text": "one two three four"},
+            {"line_id": 1, "timestamp": 10.0, "text": "later"},
+        ],
+        "chunks": [
+            {
+                "chunk_id": 0,
+                "start": 0.2,
+                "end": 1.2,
+                "text": "one two",
+                "line_ids": [0],
+                "words": [{"text": "one", "start": 0.2, "end": 0.7, "line_id": 0}],
+            },
+            {
+                "chunk_id": 1,
+                "start": 1.2,
+                "end": 4.2,
+                "text": "three four",
+                "line_ids": [0],
+                "words": [{"text": "three", "start": 1.2, "end": 2.2, "line_id": 0}],
+            },
+        ],
+    }
+
+    apply_chunk_display_timing(payload)
+
+    assert payload["chunks"][0]["display_start"] == 0.0
+    assert payload["chunks"][0]["display_end"] == 2.5
+    assert payload["chunks"][1]["display_start"] == 2.5
+    assert payload["chunks"][1]["display_end"] == 10.0
+
+
+def test_m0_prefers_display_times_over_acoustic_chunk_times() -> None:
+    payload = {
+        "meta": {},
+        "chunks": [
+            {
+                "chunk_id": 0,
+                "start": 15.754,
+                "end": 15.794,
+                "display_start": 6.636,
+                "display_end": 15.017,
+                "text": "Cry cry cry",
+                "words": [
+                    {"text": "Cry", "start": 15.754, "end": 15.889},
+                    {"text": "cry", "start": 15.957, "end": 16.091},
+                ],
+            }
+        ],
+    }
+
+    features, _ = extract_m0_features(payload)
+    chunk = features["chunks"][0]
+
+    assert chunk["start"] == 6.636
+    assert chunk["end"] == 15.017
+    assert chunk["audio_start"] == 15.754
+    assert chunk["audio_end"] == 15.794
+
+
+def test_m0_prefers_simulated_word_times_when_present() -> None:
+    payload = {
+        "meta": {},
+        "chunks": [
+            {
+                "chunk_id": 0,
+                "start": 1.0,
+                "end": 2.0,
+                "display_start": 0.5,
+                "display_end": 2.5,
+                "text": "hold on",
+                "words": [
+                    {
+                        "text": "hold",
+                        "start": 1.0,
+                        "end": 1.0,
+                        "simulated_start": 0.9,
+                        "simulated_end": 1.25,
+                        "simulated_midpoint": 1.075,
+                        "simulated_duration": 0.35,
+                        "timing_source": "simulated_from_chunk_context",
+                        "timing_confidence": 0.35,
+                    },
+                    {"text": "on", "start": 1.4, "end": 1.7},
+                ],
+            }
+        ],
+    }
+
+    features, report = extract_m0_features(payload)
+    word = features["chunks"][0]["words"][0]
+
+    assert word["start"] == 0.9
+    assert word["end"] == 1.25
+    assert word["audio_start"] == 1.0
+    assert word["audio_end"] == 1.0
+    assert word["midpoint"] == 1.075
+    assert word["simulated_duration"] == 0.35
+    assert word["is_simulated"] is True
+    assert word["timing_source"] == "simulated_from_chunk_context"
+    assert report["positive_effective_word_durations"] is True
 
 
 def test_payload_vocals_path_is_discovered_from_meta(tmp_path: Path) -> None:
@@ -534,13 +778,88 @@ def test_refine_payload_keeps_interior_zero_duration_chunk_but_makes_it_positive
     assert report["interior_zero_chunks_fixed"] == 1
 
 
+def test_refine_payload_simulates_zero_duration_word_from_chunk_context() -> None:
+    payload = {
+        "meta": {},
+        "chunks": [
+            {
+                "chunk_id": 0,
+                "start": 1.0,
+                "end": 2.2,
+                "display_start": 1.0,
+                "display_end": 2.2,
+                "text": "hello there world",
+                "words": [
+                    {"text": "hello", "start": 1.0, "end": 1.3, "confidence": 0.9},
+                    {"text": "there", "start": 1.5, "end": 1.5, "confidence": 0.2},
+                    {"text": "world", "start": 1.8, "end": 2.2, "confidence": 0.9},
+                ],
+            }
+        ],
+        "words": [
+            {"text": "hello", "start": 1.0, "end": 1.3, "confidence": 0.9},
+            {"text": "there", "start": 1.5, "end": 1.5, "confidence": 0.2},
+            {"text": "world", "start": 1.8, "end": 2.2, "confidence": 0.9},
+        ],
+    }
+
+    refined, report = refine_payload(payload, profile="slow_attack")
+
+    repaired = refined["chunks"][0]["words"][1]
+    assert repaired["timing_source"] == "simulated_from_chunk_context"
+    assert repaired["simulated_duration"] > 0.0
+    assert 1.3 <= repaired["simulated_midpoint"] <= 1.8
+    assert repaired["simulated_start"] < repaired["simulated_end"]
+    assert report["simulated_zero_words"] == 1
+    assert report["simulated_zero_word_groups"] == 1
+
+
+def test_refine_payload_simulates_consecutive_zero_duration_words_as_a_group() -> None:
+    payload = {
+        "meta": {},
+        "chunks": [
+            {
+                "chunk_id": 0,
+                "start": 0.0,
+                "end": 2.4,
+                "display_start": 0.0,
+                "display_end": 2.4,
+                "text": "around my house tonight",
+                "words": [
+                    {"text": "around", "start": 0.0, "end": 0.4},
+                    {"text": "my", "start": 0.9, "end": 0.9},
+                    {"text": "house", "start": 1.1, "end": 1.1},
+                    {"text": "tonight", "start": 1.8, "end": 2.3},
+                ],
+            }
+        ],
+        "words": [
+            {"text": "around", "start": 0.0, "end": 0.4},
+            {"text": "my", "start": 0.9, "end": 0.9},
+            {"text": "house", "start": 1.1, "end": 1.1},
+            {"text": "tonight", "start": 1.8, "end": 2.3},
+        ],
+    }
+
+    refined, report = refine_payload(payload, profile="slow_attack")
+
+    my_word = refined["chunks"][0]["words"][1]
+    house_word = refined["chunks"][0]["words"][2]
+    assert my_word["timing_source"] == "simulated_from_chunk_context"
+    assert house_word["timing_source"] == "simulated_from_chunk_context"
+    assert my_word["simulated_end"] <= house_word["simulated_start"]
+    assert my_word["simulated_midpoint"] < house_word["simulated_midpoint"]
+    assert report["simulated_zero_words"] == 2
+    assert report["simulated_zero_word_groups"] == 1
+
+
 def test_chunking_splits_high_confidence_short_span_line_break() -> None:
     words = [
         build_word("hello", 0.00, 0.07, line_id=0, confidence=0.995, index=0),
         build_word("world", 0.08, 0.15, line_id=1, confidence=0.992, index=1),
     ]
 
-    chunks = build_chunks(words, ChunkingConfig(merge_gap=0.005))
+    chunks = build_chunks(words, ChunkingConfig(merge_gap=0.005, chunker_model="legacy"))
 
     assert len(chunks) == 2
     assert [chunk.text for chunk in chunks] == ["hello", "world"]
@@ -552,7 +871,7 @@ def test_chunking_keeps_low_confidence_line_break_together() -> None:
         build_word("world", 0.08, 0.15, line_id=1, confidence=0.96, index=1),
     ]
 
-    chunks = build_chunks(words, ChunkingConfig())
+    chunks = build_chunks(words, ChunkingConfig(chunker_model="legacy"))
 
     assert len(chunks) == 1
     assert chunks[0].text == "hello world"
@@ -567,6 +886,7 @@ def test_chunking_no_longer_splits_on_character_limit_alone() -> None:
     chunks = build_chunks(
         words,
         ChunkingConfig(
+            chunker_model="legacy",
             max_chars=8,
             max_words=6,
             max_gap=1.0,
@@ -578,6 +898,130 @@ def test_chunking_no_longer_splits_on_character_limit_alone() -> None:
     assert len(chunks) == 1
     assert "supercalifragilisticexpialidocious" in chunks[0].text
     assert "pneumonoultramicroscopicsilicovolcanoconiosis" in chunks[0].text
+
+
+def test_semantic_chunking_never_crosses_line_boundaries() -> None:
+    words = [
+        build_word("hello", 0.00, 0.30, line_id=0, confidence=0.90, index=0),
+        build_word("world", 0.32, 0.62, line_id=0, confidence=0.90, index=1),
+        build_word("again", 0.70, 1.00, line_id=1, confidence=0.90, index=2),
+    ]
+
+    chunks = build_chunks(
+        words,
+        ChunkingConfig(chunker_model="semantic_dp"),
+        line_timestamps={0: 0.0, 1: 0.7},
+    )
+
+    assert [chunk.text for chunk in chunks] == ["hello world", "again"]
+
+
+def test_semantic_chunking_hard_anchors_first_chunk_to_line_timestamp() -> None:
+    words = [
+        build_word("hello", 1.05, 1.30, line_id=0, confidence=0.99, index=0),
+        build_word("world", 1.34, 1.72, line_id=0, confidence=0.99, index=1),
+    ]
+
+    chunks = build_chunks(
+        words,
+        ChunkingConfig(chunker_model="semantic_dp", line_start_anchor=True),
+        line_timestamps={0: 1.0},
+    )
+
+    assert chunks[0].start == 1.0
+
+
+def test_semantic_chunking_suppresses_line_anchor_when_alignment_is_far_from_lrc() -> None:
+    words = [
+        build_word("cry", 15.04, 15.20, line_id=0, confidence=0.99, index=0),
+        build_word("baby", 15.22, 15.84, line_id=0, confidence=0.99, index=1),
+    ]
+
+    chunks = build_chunks(
+        words,
+        ChunkingConfig(
+            chunker_model="semantic_dp",
+            line_start_anchor=True,
+            line_start_anchor_tolerance=1.0,
+        ),
+        line_timestamps={0: 0.0},
+    )
+
+    assert chunks[0].start == 15.04
+    assert chunks[0].flags["line_anchor_suppressed"] is True
+
+
+def test_semantic_chunking_blocks_short_gap_cut() -> None:
+    words = [
+        build_word("hold", 0.00, 0.20, line_id=0, confidence=0.99, index=0),
+        build_word("on", 0.23, 0.43, line_id=0, confidence=0.99, index=1),
+        build_word("tight", 0.70, 1.10, line_id=0, confidence=0.99, index=2),
+    ]
+
+    chunks = build_chunks(
+        words,
+        ChunkingConfig(chunker_model="semantic_dp", short_gap_block=0.12),
+        line_timestamps={0: 0.0},
+    )
+
+    assert [chunk.text for chunk in chunks] == ["hold on", "tight"]
+
+
+def test_semantic_chunking_prefers_two_plus_two_when_gap_is_long() -> None:
+    words = [
+        build_word("when", 0.00, 0.25, line_id=0, confidence=0.99, index=0),
+        build_word("you", 0.28, 0.52, line_id=0, confidence=0.99, index=1),
+        build_word("cry", 1.10, 1.42, line_id=0, confidence=0.99, index=2),
+        build_word("baby", 1.45, 1.85, line_id=0, confidence=0.99, index=3),
+    ]
+
+    chunks = build_chunks(
+        words,
+        ChunkingConfig(chunker_model="semantic_dp"),
+        line_timestamps={0: 0.0},
+    )
+
+    assert [chunk.text for chunk in chunks] == ["when you", "cry baby"]
+
+
+def test_semantic_chunking_prefers_three_plus_three_with_flat_internal_gaps() -> None:
+    words = [
+        build_word("one", 0.00, 0.20, line_id=0, confidence=0.99, index=0),
+        build_word("two", 0.20, 0.40, line_id=0, confidence=0.99, index=1),
+        build_word("three", 0.40, 0.60, line_id=0, confidence=0.99, index=2),
+        build_word("four", 0.60, 0.80, line_id=0, confidence=0.99, index=3),
+        build_word("five", 0.80, 1.00, line_id=0, confidence=0.99, index=4),
+        build_word("six", 1.00, 1.20, line_id=0, confidence=0.99, index=5),
+    ]
+
+    chunks = build_chunks(
+        words,
+        ChunkingConfig(chunker_model="semantic_dp", embedding_model_path="./DOES_NOT_EXIST"),
+        line_timestamps={0: 0.0},
+    )
+
+    assert [chunk.text for chunk in chunks] == ["one two three", "four five six"]
+
+
+def test_semantic_chunking_can_split_long_line_without_large_gaps() -> None:
+    words = [
+        build_word("around", 0.00, 0.18, line_id=0, confidence=0.99, index=0),
+        build_word("my", 0.18, 0.36, line_id=0, confidence=0.99, index=1),
+        build_word("house", 0.36, 0.54, line_id=0, confidence=0.99, index=2),
+        build_word("i", 0.54, 0.72, line_id=0, confidence=0.99, index=3),
+        build_word("still", 0.72, 0.90, line_id=0, confidence=0.99, index=4),
+        build_word("got", 0.90, 1.08, line_id=0, confidence=0.99, index=5),
+        build_word("up", 1.08, 1.26, line_id=0, confidence=0.99, index=6),
+        build_word("all", 1.26, 1.44, line_id=0, confidence=0.99, index=7),
+    ]
+
+    chunks = build_chunks(
+        words,
+        ChunkingConfig(chunker_model="semantic_dp", embedding_model_path="./DOES_NOT_EXIST"),
+        line_timestamps={0: 0.0},
+    )
+
+    assert [chunk.text for chunk in chunks] == ["around my house i", "still got up all"]
 
 
 def test_collect_folder_pairs_matches_same_basename_and_prefers_wav(tmp_path: Path) -> None:

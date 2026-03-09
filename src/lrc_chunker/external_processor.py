@@ -16,7 +16,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from .alignment import AlignmentConfig, align_lyrics, build_alignment_payload
 from .baseline import _default_denoiser_output
 from .chunking import ChunkingConfig, build_chunks
-from .lrc import parse_lrc
+from .lrc import LrcParseConfig, parse_lrc
 from .utils import (
     atomic_write_json,
     atomic_write_text,
@@ -284,7 +284,7 @@ def render_chunk_lrc(payload: dict) -> Tuple[str, List[str]]:
                 except (TypeError, ValueError):
                     first_line_id = None
 
-        timestamp = float(chunk.get("start", 0.0))
+        timestamp = float(chunk.get("display_start", chunk.get("start", 0.0)))
         if first_line_id is not None and first_line_id in line_timestamps and first_line_id not in seen_line_ids:
             timestamp = float(line_timestamps[first_line_id])
             seen_line_ids.add(first_line_id)
@@ -301,7 +301,16 @@ def _pair_work_dir(base_dir: Path, pair: PairJob) -> Path:
 
 
 def process_pair_to_lrc(pair: PairJob, *, options: Dict[str, object], work_dir: Path) -> Dict[str, object]:
-    lines = parse_lrc(pair.lrc_path)
+    lines = parse_lrc(
+        pair.lrc_path,
+        LrcParseConfig(
+            metadata_head_window_seconds=float(options.get("metadata_head_window_seconds") or 45.0),
+            metadata_tail_window_seconds=float(options.get("metadata_tail_window_seconds") or 45.0),
+            metadata_embedding_model_path=str(options.get("embedding_model_path") or "Qwen/Qwen3-Embedding-0.6B"),
+            metadata_embedding_local_only=bool(options.get("embedding_local_only", True)),
+            use_metadata_embedding=bool(options.get("metadata_use_embedding", True)),
+        ),
+    )
     if not lines:
         raise ExternalProcessorError("LRC_PARSE_FAILED", f"No usable lyric rows found in {pair.lrc_path}", exit_code=10)
 
@@ -337,10 +346,26 @@ def process_pair_to_lrc(pair: PairJob, *, options: Dict[str, object], work_dir: 
         long_word_single_threshold=float(options.get("long_word_single_threshold") or 0.78),
         long_word_bonus=float(options.get("long_word_bonus") or 2.6),
         apply_clamp_max=bool(options.get("apply_clamp_max", True)),
+        chunker_model=str(options.get("chunker_model") or "semantic_dp"),
+        min_chunk_dur=float(options.get("min_chunk_dur") or 0.30),
+        short_gap_block=float(options.get("short_gap_block") or 0.12),
+        hard_overlap_block=float(options.get("hard_overlap_block") or 0.03),
+        semantic_weight=float(options.get("semantic_weight") or 1.0),
+        embedding_weight=float(options.get("embedding_weight") or 2.4),
+        gap_weight=float(options.get("gap_weight") or 0.30),
+        length_weight=float(options.get("length_weight") or 0.65),
+        line_start_anchor=bool(options.get("line_start_anchor", True)),
+        line_start_anchor_tolerance=float(options.get("line_start_anchor_tolerance") or 1.0),
+        embedding_model_path=str(options.get("embedding_model_path") or "Qwen/Qwen3-Embedding-0.6B"),
+        embedding_instruction=str(
+            options.get("embedding_instruction")
+            or "Decide whether a lyric phrase boundary before the target word is natural for karaoke subtitle chunking."
+        ),
+        embedding_local_only=bool(options.get("embedding_local_only", True)),
     )
 
     words, _, backend_used = align_lyrics(pair.audio_path, lines, align_config)
-    chunks = build_chunks(words, chunk_config)
+    chunks = build_chunks(words, chunk_config, line_timestamps={line.line_id: line.timestamp for line in lines})
     payload = build_alignment_payload(
         audio_path=pair.audio_path,
         lrc_path=pair.lrc_path,
